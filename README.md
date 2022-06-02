@@ -1,2 +1,4 @@
-# IMITER
-Imitative mixed image-text representation learning
+# IMITER: Imitative Mixed Image-TExt Representation learning
+
+
+
