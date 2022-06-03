@@ -7,7 +7,7 @@ from packaging import version
 from torch import Tensor 
 from transformers.modeling_utils import PreTrainedModel 
 
-from .configuration import ITRConfig 
+from .model_config import ITRConfig 
 
 
 
@@ -762,12 +762,8 @@ class ITRForImageAndTextRetrieval(ITRPreTrainedModel):
 
         logits = self.rank_output(pooler_output)
 
-        loss = None
-        if labels is not None:
-            raise NotImplementedError("Training is not yet supported.")
-
         output = (logits,) + outputs[2:]
-        return ((loss,) + output) if loss is not None else output
+        return output
 
 
 

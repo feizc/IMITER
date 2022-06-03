@@ -1,338 +1,363 @@
+# include the image transform for image 
+import random
+import torch
+
+from torchvision import transforms
+from PIL import Image
+import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np 
-from typing import List, Optional, Union
-from PIL import Image 
-import torch 
-from transformers.image_utils import (
-    IMAGENET_STANDARD_MEAN,
-    IMAGENET_STANDARD_STD,
-    ImageFeatureExtractionMixin,
-    ImageInput,
-    is_torch_tensor,
-)
-from transformers.file_utils import TensorType, is_torch_available
-from transformers.feature_extraction_utils import FeatureExtractionMixin, BatchFeature
-from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
 
 
-class ITRFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin):
-    r"""
-    Constructs a ITR feature extractor.
 
-    This feature extractor inherits from [`FeatureExtractionMixin`] which contains most of the main methods. Users
-    should refer to this superclass for more information regarding those methods.
+class MinMaxResize:
+    def __init__(self, shorter=800, longer=1333):
+        self.min = shorter
+        self.max = longer
 
-    Args:
-        do_resize (`bool`, *optional*, defaults to `True`):
-            Whether to resize the input based on `size`.
-        size (`int`, *optional*, defaults to 384):
-            Resize the shorter side of the input to the given size. Should be an integer. The longer side will be
-            limited to under int((1333 / 800) * size) while preserving the aspect ratio. Only has an effect if
-            `do_resize` is set to `True`.
-        size_divisor (`int`, *optional*, defaults to 32):
-            The size by which to make sure both the height and width can be divided.
-        resample (`int`, *optional*, defaults to `PIL.Image.BICUBIC`):
-            An optional resampling filter. This can be one of `PIL.Image.NEAREST`, `PIL.Image.BOX`,
-            `PIL.Image.BILINEAR`, `PIL.Image.HAMMING`, `PIL.Image.BICUBIC` or `PIL.Image.LANCZOS`. Only has an effect
-            if `do_resize` is set to `True`.
-        do_normalize (`bool`, *optional*, defaults to `True`):
-            Whether or not to normalize the input with mean and standard deviation.
-        image_mean (`List[int]`, defaults to `[0.5, 0.5, 0.5]`):
-            The sequence of means for each channel, to be used when normalizing images.
-        image_std (`List[int]`, defaults to `[0.5, 0.5, 0.5]`):
-            The sequence of standard deviations for each channel, to be used when normalizing images.
-    """
-
-    model_input_names = ["pixel_values", "pixel_mask"]
-
-    def __init__(
-        self,
-        do_resize=True,
-        size=384,
-        size_divisor=32,
-        resample=Image.BICUBIC,
-        do_normalize=True,
-        image_mean=None,
-        image_std=None,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.do_resize = do_resize
-        self.size = size
-        self.size_divisor = size_divisor
-        self.resample = resample
-        self.do_normalize = do_normalize
-        self.image_mean = image_mean if image_mean is not None else IMAGENET_STANDARD_MEAN
-        self.image_std = image_std if image_std is not None else IMAGENET_STANDARD_STD
-
-    def _resize(self, image, shorter=800, longer=1333, size_divisor=32, resample=Image.BICUBIC):
-        """
-        Resizes the shorter edge of `image` to `shorter` and limits the longer edge to under `longer`, while preserving
-        the aspect ratio. Also makes sure that both the height and width can be divided by `size_divisor`.
-
-
-        Args:
-            image (`PIL.Image`):
-                The image to resize.
-            shorter (`int`, *optional*, defaults to `800`):
-                The size to which to resize the shorter side of the image.
-            longer (`int`, *optional*, defaults to `1333`):
-                The size by which to limit the longer side of the image, while preserving the aspect ratio.
-            size_divisor (`int`, *optional*, defaults to `32`):
-                The size by which both the height and the width must be divisible.
-            resample (`int`, *optional*, defaults to `PIL.Image.BICUBIC`):
-                An optional resampling filter.
-        """
-        if not isinstance(image, Image.Image):
-            image = self.to_pil_image(image)
-
-        w, h = image.size
-        min_size = shorter
-        max_size = longer
-        scale = min_size / min(w, h)
+    def __call__(self, x):
+        w, h = x.size
+        scale = self.min / min(w, h)
         if h < w:
-            newh, neww = min_size, scale * w
+            newh, neww = self.min, scale * w
         else:
-            newh, neww = scale * h, min_size
+            newh, neww = scale * h, self.min
 
-        if max(newh, neww) > max_size:
-            scale = max_size / max(newh, neww)
+        if max(newh, neww) > self.max:
+            scale = self.max / max(newh, neww)
             newh = newh * scale
             neww = neww * scale
 
         newh, neww = int(newh + 0.5), int(neww + 0.5)
-        newh, neww = newh // size_divisor * size_divisor, neww // size_divisor * size_divisor
+        newh, neww = newh // 32 * 32, neww // 32 * 32
 
-        return self.resize(image, size=(neww, newh), resample=resample)
+        return x.resize((neww, newh), resample=Image.BICUBIC)
 
-    def _max_by_axis(self, the_list):
-        # type: (List[List[int]]) -> List[int]
-        maxes = the_list[0]
-        for sublist in the_list[1:]:
-            for index, item in enumerate(sublist):
-                maxes[index] = max(maxes[index], item)
-        return maxes
 
-    def pad_and_create_pixel_mask(
-        self, pixel_values_list: List["torch.Tensor"], return_tensors: Optional[Union[str, TensorType]] = None
-    ):
+class UnNormalize(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
         """
-        Pad images up to the largest image in a batch and create a corresponding `pixel_mask`.
-
         Args:
-            pixel_values_list (`List[torch.Tensor]`):
-                List of images (pixel values) to be padded. Each image should be a tensor of shape (C, H, W).
-            return_tensors (`str` or [`~file_utils.TensorType`], *optional*):
-                If set, will return tensors instead of NumPy arrays. If set to `'pt'`, return PyTorch `torch.Tensor`
-                objects.
-
+            tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
         Returns:
-            [`BatchFeature`]: A [`BatchFeature`] with the following fields:
-
-            - **pixel_values** -- Pixel values to be fed to a model.
-            - **pixel_mask** -- Pixel mask to be fed to a model (when `pad_and_return_pixel_mask=True` or if
-              *"pixel_mask"* is in `self.model_input_names`).
+            Tensor: Normalized image.
         """
+        for t, m, s in zip(tensor, self.mean, self.std):
+            t.mul_(s).add_(m)
+            # The normalize code -> t.sub_(m).div_(s)
+        return tensor
 
-        max_size = self._max_by_axis([list(image.shape) for image in pixel_values_list])
-        c, h, w = max_size
-        padded_images = []
-        pixel_mask = []
-        for image in pixel_values_list:
-            # create padded image
-            padded_image = np.zeros((c, h, w), dtype=np.float32)
-            padded_image[: image.shape[0], : image.shape[1], : image.shape[2]] = np.copy(image)
-            padded_images.append(padded_image)
-            # create pixel mask
-            mask = np.zeros((h, w), dtype=np.int64)
-            mask[: image.shape[1], : image.shape[2]] = True
-            pixel_mask.append(mask)
 
-        # return as BatchFeature
-        data = {"pixel_values": padded_images, "pixel_mask": pixel_mask}
-        encoded_inputs = BatchFeature(data=data, tensor_type=return_tensors)
+# This is simple maximum entropy normalization performed in Inception paper
+inception_normalize = transforms.Compose(
+    [transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])]
+)
 
-        return encoded_inputs
+# ViT uses simple non-biased inception normalization
+# https://github.com/google-research/vision_transformer/blob/master/vit_jax/input_pipeline.py#L132
+inception_unnormalize = transforms.Compose(
+    [UnNormalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])]
+)
 
-    def __call__(
-        self,
-        images: ImageInput,
-        pad_and_return_pixel_mask: Optional[bool] = True,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-        **kwargs
-    ) -> BatchFeature:
-        """
-        Main method to prepare for the model one or several image(s).
 
-        <Tip warning={true}>
 
-        NumPy arrays and PyTorch tensors are converted to PIL images when resizing, so the most efficient is to pass
-        PIL images.
 
-        </Tip>
+def ShearX(img, v):  # [-0.3, 0.3]
+    assert -0.3 <= v <= 0.3
+    if random.random() > 0.5:
+        v = -v
+    return img.transform(img.size, PIL.Image.AFFINE, (1, v, 0, 0, 1, 0))
 
-        Args:
-            images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
-                The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
-                tensor. In case of a NumPy array/PyTorch tensor, each image should be of shape (C, H, W), where C is a
-                number of channels, H and W are image height and width.
 
-            pad_and_return_pixel_mask (`bool`, *optional*, defaults to `True`):
-                Whether or not to pad images up to the largest image in a batch and create a pixel mask.
+def ShearY(img, v):  # [-0.3, 0.3]
+    assert -0.3 <= v <= 0.3
+    if random.random() > 0.5:
+        v = -v
+    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, v, 1, 0))
 
-                If left to the default, will return a pixel mask that is:
 
-                - 1 for pixels that are real (i.e. **not masked**),
-                - 0 for pixels that are padding (i.e. **masked**).
+def TranslateX(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
+    assert -0.45 <= v <= 0.45
+    if random.random() > 0.5:
+        v = -v
+    v = v * img.size[0]
+    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, v, 0, 1, 0))
 
-            return_tensors (`str` or [`~file_utils.TensorType`], *optional*, defaults to `'np'`):
-                If set, will return tensors of a particular framework. Acceptable values are:
 
-                - `'tf'`: Return TensorFlow `tf.constant` objects.
-                - `'pt'`: Return PyTorch `torch.Tensor` objects.
-                - `'np'`: Return NumPy `np.ndarray` objects.
-                - `'jax'`: Return JAX `jnp.ndarray` objects.
+def TranslateXabs(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
+    assert 0 <= v
+    if random.random() > 0.5:
+        v = -v
+    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, v, 0, 1, 0))
 
-        Returns:
-            [`BatchFeature`]: A [`BatchFeature`] with the following fields:
 
-            - **pixel_values** -- Pixel values to be fed to a model, of shape (batch_size, num_channels, height,
-              width).
-            - **pixel_mask** -- Pixel mask to be fed to a model (when `return_pixel_mask=True` or if *"pixel_mask"* is
-              in `self.model_input_names`).
-        """
-        # Input type checking for clearer error
-        valid_images = False
+def TranslateY(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
+    assert -0.45 <= v <= 0.45
+    if random.random() > 0.5:
+        v = -v
+    v = v * img.size[1]
+    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, 0, 1, v))
 
-        # Check that images has a valid type
-        if isinstance(images, (Image.Image, np.ndarray)) or is_torch_tensor(images):
-            valid_images = True
-        elif isinstance(images, (list, tuple)):
-            if len(images) == 0 or isinstance(images[0], (Image.Image, np.ndarray)) or is_torch_tensor(images[0]):
-                valid_images = True
 
-        if not valid_images:
-            raise ValueError(
-                "Images must of type `PIL.Image.Image`, `np.ndarray` or `torch.Tensor` (single example), "
-                "`List[PIL.Image.Image]`, `List[np.ndarray]` or `List[torch.Tensor]` (batch of examples)."
-            )
+def TranslateYabs(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
+    assert 0 <= v
+    if random.random() > 0.5:
+        v = -v
+    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, 0, 1, v))
 
-        is_batched = bool(
-            isinstance(images, (list, tuple))
-            and (isinstance(images[0], (Image.Image, np.ndarray)) or is_torch_tensor(images[0]))
+
+def Rotate(img, v):  # [-30, 30]
+    assert -30 <= v <= 30
+    if random.random() > 0.5:
+        v = -v
+    return img.rotate(v)
+
+
+def AutoContrast(img, _):
+    return PIL.ImageOps.autocontrast(img)
+
+
+def Invert(img, _):
+    return PIL.ImageOps.invert(img)
+
+
+def Equalize(img, _):
+    return PIL.ImageOps.equalize(img)
+
+
+def Flip(img, _):  # not from the paper
+    return PIL.ImageOps.mirror(img)
+
+
+def Solarize(img, v):  # [0, 256]
+    assert 0 <= v <= 256
+    return PIL.ImageOps.solarize(img, v)
+
+
+def SolarizeAdd(img, addition=0, threshold=128):
+    img_np = np.array(img).astype(np.int)
+    img_np = img_np + addition
+    img_np = np.clip(img_np, 0, 255)
+    img_np = img_np.astype(np.uint8)
+    img = Image.fromarray(img_np)
+    return PIL.ImageOps.solarize(img, threshold)
+
+
+def Posterize(img, v):  # [4, 8]
+    v = int(v)
+    v = max(1, v)
+    return PIL.ImageOps.posterize(img, v)
+
+
+def Contrast(img, v):  # [0.1,1.9]
+    assert 0.1 <= v <= 1.9
+    return PIL.ImageEnhance.Contrast(img).enhance(v)
+
+
+def Color(img, v):  # [0.1,1.9]
+    assert 0.1 <= v <= 1.9
+    return PIL.ImageEnhance.Color(img).enhance(v)
+
+
+def Brightness(img, v):  # [0.1,1.9]
+    assert 0.1 <= v <= 1.9
+    return PIL.ImageEnhance.Brightness(img).enhance(v)
+
+
+def Sharpness(img, v):  # [0.1,1.9]
+    assert 0.1 <= v <= 1.9
+    return PIL.ImageEnhance.Sharpness(img).enhance(v)
+
+
+def Cutout(img, v):  # [0, 60] => percentage: [0, 0.2]
+    assert 0.0 <= v <= 0.2
+    if v <= 0.0:
+        return img
+
+    v = v * img.size[0]
+    return CutoutAbs(img, v)
+
+
+def CutoutAbs(img, v):  # [0, 60] => percentage: [0, 0.2]
+    # assert 0 <= v <= 20
+    if v < 0:
+        return img
+    w, h = img.size
+    x0 = np.random.uniform(w)
+    y0 = np.random.uniform(h)
+
+    x0 = int(max(0, x0 - v / 2.0))
+    y0 = int(max(0, y0 - v / 2.0))
+    x1 = min(w, x0 + v)
+    y1 = min(h, y0 + v)
+
+    xy = (x0, y0, x1, y1)
+    color = (125, 123, 114)
+    # color = (0, 0, 0)
+    img = img.copy()
+    PIL.ImageDraw.Draw(img).rectangle(xy, color)
+    return img
+
+
+def SamplePairing(imgs):  # [0, 0.4]
+    def f(img1, v):
+        i = np.random.choice(len(imgs))
+        img2 = PIL.Image.fromarray(imgs[i])
+        return PIL.Image.blend(img1, img2, v)
+
+    return f
+
+
+def Identity(img, v):
+    return img
+
+
+def augment_list():  # 16 oeprations and their ranges
+    # https://github.com/google-research/uda/blob/master/image/randaugment/policies.py#L57
+    # l = [
+    #     (Identity, 0., 1.0),
+    #     (ShearX, 0., 0.3),  # 0
+    #     (ShearY, 0., 0.3),  # 1
+    #     (TranslateX, 0., 0.33),  # 2
+    #     (TranslateY, 0., 0.33),  # 3
+    #     (Rotate, 0, 30),  # 4
+    #     (AutoContrast, 0, 1),  # 5
+    #     (Invert, 0, 1),  # 6
+    #     (Equalize, 0, 1),  # 7
+    #     (Solarize, 0, 110),  # 8
+    #     (Posterize, 4, 8),  # 9
+    #     # (Contrast, 0.1, 1.9),  # 10
+    #     (Color, 0.1, 1.9),  # 11
+    #     (Brightness, 0.1, 1.9),  # 12
+    #     (Sharpness, 0.1, 1.9),  # 13
+    #     # (Cutout, 0, 0.2),  # 14
+    #     # (SamplePairing(imgs), 0, 0.4),  # 15
+    # ]
+
+    # https://github.com/tensorflow/tpu/blob/8462d083dd89489a79e3200bcc8d4063bf362186/models/official/efficientnet/autoaugment.py#L505
+    l = [
+        (AutoContrast, 0, 1),
+        (Equalize, 0, 1),
+        # (Invert, 0, 1),
+        (Rotate, 0, 30),
+        (Posterize, 0, 4),
+        (Solarize, 0, 256),
+        (SolarizeAdd, 0, 110),
+        (Color, 0.1, 1.9),
+        (Contrast, 0.1, 1.9),
+        (Brightness, 0.1, 1.9),
+        (Sharpness, 0.1, 1.9),
+        (ShearX, 0.0, 0.3),
+        (ShearY, 0.0, 0.3),
+        # (CutoutAbs, 0, 40),
+        (TranslateXabs, 0.0, 100),
+        (TranslateYabs, 0.0, 100),
+    ]
+
+    return l
+
+
+class Lighting(object):
+    """Lighting noise(AlexNet - style PCA - based noise)"""
+
+    def __init__(self, alphastd, eigval, eigvec):
+        self.alphastd = alphastd
+        self.eigval = torch.Tensor(eigval)
+        self.eigvec = torch.Tensor(eigvec)
+
+    def __call__(self, img):
+        if self.alphastd == 0:
+            return img
+
+        alpha = img.new().resize_(3).normal_(0, self.alphastd)
+        rgb = (
+            self.eigvec.type_as(img)
+            .clone()
+            .mul(alpha.view(1, 3).expand(3, 3))
+            .mul(self.eigval.view(1, 3).expand(3, 3))
+            .sum(1)
+            .squeeze()
         )
 
-        if not is_batched:
-            images = [images]
+        return img.add(rgb.view(3, 1, 1).expand_as(img))
 
-        # transformations (resizing + normalization)
-        if self.do_resize and self.size is not None:
-            longer = int((1333 / 800) * self.size)
-            images = [
-                self._resize(
-                    image=image,
-                    shorter=self.size,
-                    longer=longer,
-                    size_divisor=self.size_divisor,
-                    resample=self.resample,
-                )
-                for image in images
-            ]
-        if self.do_normalize:
-            images = [self.normalize(image=image, mean=self.image_mean, std=self.image_std) for image in images]
 
-        if pad_and_return_pixel_mask:
-            # pad images up to largest image in batch and create pixel_mask
-            max_size = self._max_by_axis([list(image.shape) for image in images])
-            c, h, w = max_size
-            padded_images = []
-            pixel_mask = []
-            for image in images:
-                # create padded image
-                padded_image = np.zeros((c, h, w), dtype=np.float32)
-                padded_image[: image.shape[0], : image.shape[1], : image.shape[2]] = np.copy(image)
-                padded_images.append(padded_image)
-                # create pixel mask
-                mask = np.zeros((h, w), dtype=np.int64)
-                mask[: image.shape[1], : image.shape[2]] = True
-                pixel_mask.append(mask)
-            images = padded_images
+class CutoutDefault(object):
+    """
+    Reference : https://github.com/quark0/darts/blob/master/cnn/utils.py
+    """
 
-        # return as BatchFeature
-        data = {}
-        data["pixel_values"] = images
-        if pad_and_return_pixel_mask:
-            data["pixel_mask"] = pixel_mask
-        encoded_inputs = BatchFeature(data=data, tensor_type=return_tensors)
+    def __init__(self, length):
+        self.length = length
 
-        return encoded_inputs 
+    def __call__(self, img):
+        h, w = img.size(1), img.size(2)
+        mask = np.ones((h, w), np.float32)
+        y = np.random.randint(h)
+        x = np.random.randint(w)
+
+        y1 = np.clip(y - self.length // 2, 0, h)
+        y2 = np.clip(y + self.length // 2, 0, h)
+        x1 = np.clip(x - self.length // 2, 0, w)
+        x2 = np.clip(x + self.length // 2, 0, w)
+
+        mask[y1:y2, x1:x2] = 0.0
+        mask = torch.from_numpy(mask)
+        mask = mask.expand_as(img)
+        img *= mask
+        return img
+
+
+class RandAugment:
+    def __init__(self, n, m):
+        self.n = n
+        self.m = m  # [0, 30]
+        self.augment_list = augment_list()
+
+    def __call__(self, img):
+        ops = random.choices(self.augment_list, k=self.n)
+        for op, minval, maxval in ops:
+            val = (float(self.m) / 30) * float(maxval - minval) + minval
+            img = op(img, val)
+
+        return img 
 
 
 
+def pixelbert_transform(size=800):
+    longer = int((1333 / 800) * size)
+    return transforms.Compose(
+        [
+            MinMaxResize(shorter=size, longer=longer),
+            transforms.ToTensor(),
+            inception_normalize,
+        ]
+    )
 
-class ITRProcessor:
 
-    feature_extractor_class = "ITRFeatureExtractor"
-    tokenizer_class = ("BertTokenizer", "BertTokenizerFast")
+def pixelbert_transform_randaug(size=800):
+    longer = int((1333 / 800) * size)
+    trs = transforms.Compose(
+        [
+            MinMaxResize(shorter=size, longer=longer),
+            transforms.ToTensor(),
+            inception_normalize,
+        ]
+    )
+    trs.transforms.insert(0, RandAugment(2, 9))
+    return trs
 
-    def __init__(self, feature_extractor, tokenizer):
-        self.tokenizer = tokenizer 
-        self.feature_extractor = feature_extractor
 
-    def __call__(
-        self,
-        images,
-        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
-        add_special_tokens: bool = True,
-        padding: Union[bool, str, PaddingStrategy] = False,
-        truncation: Union[bool, str, TruncationStrategy] = False,
-        max_length: Optional[int] = None,
-        stride: int = 0,
-        pad_to_multiple_of: Optional[int] = None,
-        return_token_type_ids: Optional[bool] = None,
-        return_attention_mask: Optional[bool] = None,
-        return_overflowing_tokens: bool = False,
-        return_special_tokens_mask: bool = False,
-        return_offsets_mapping: bool = False,
-        return_length: bool = False,
-        verbose: bool = True,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-        **kwargs
-    ) -> BatchEncoding:
-        
-        encoding = self.tokenizer(
-            text=text,
-            add_special_tokens=add_special_tokens,
-            padding=padding,
-            truncation=truncation,
-            max_length=max_length,
-            stride=stride,
-            pad_to_multiple_of=pad_to_multiple_of,
-            return_token_type_ids=return_token_type_ids,
-            return_attention_mask=return_attention_mask,
-            return_overflowing_tokens=return_overflowing_tokens,
-            return_special_tokens_mask=return_special_tokens_mask,
-            return_offsets_mapping=return_offsets_mapping,
-            return_length=return_length,
-            verbose=verbose,
-            return_tensors=return_tensors,
-            **kwargs,
-        )
-        # add pixel_values + pixel_mask
-        encoding_feature_extractor = self.feature_extractor(images, return_tensors=return_tensors)
-        encoding.update(encoding_feature_extractor)
 
-        return encoding
+_transforms = {
+    "pixelbert": pixelbert_transform,
+    "pixelbert_randaug": pixelbert_transform_randaug,
+}
 
-    def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to BertTokenizerFast's [`~PreTrainedTokenizer.batch_decode`]. Please
-        refer to the docstring of this method for more information.
-        """
-        return self.tokenizer.batch_decode(*args, **kwargs)
 
-    def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to BertTokenizerFast's [`~PreTrainedTokenizer.decode`]. Please refer to
-        the docstring of this method for more information.
-        """
-        return self.tokenizer.decode(*args, **kwargs)
+def keys_to_transforms(keys: list, size=224):
+    return [_transforms[key](size=size) for key in keys]
+
