@@ -269,8 +269,8 @@ class ITREmbeddings(nn.Module):
         image_embeds = image_embeds + self.token_type_embeddings(
             torch.full_like(image_masks, image_token_type_idx, dtype=torch.long, device=text_embeds.device)
         )
-
-        # PART 4: concatenate
+        
+        # PART 4: concatenate  (bsz, max_len, hidden_state), (bsz, 384/32 + 1, hidden_state)
         embeddings = torch.cat([text_embeds, image_embeds], dim=1)
         masks = torch.cat([attention_mask, image_masks], dim=1)
 

@@ -7,6 +7,11 @@ from PIL import Image
 import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np 
 
+try:
+    from torchvision.transforms import InterpolationMode
+    BICUBIC = InterpolationMode.BICUBIC
+except ImportError:
+    BICUBIC = Image.BICUBIC
 
 
 class MinMaxResize:
@@ -352,9 +357,24 @@ def pixelbert_transform_randaug(size=800):
 
 
 
+def _convert_image_to_rgb(image):
+    return image.convert("RGB") 
+
+
+def clip_transform(size=224):
+    return transforms.Compose([
+        transforms.Resize(size, interpolation=BICUBIC),
+        transforms.CenterCrop(size),
+        _convert_image_to_rgb,
+        transforms.ToTensor(),
+        inception_normalize, 
+    ])
+
+
+
 _transforms = {
-    "pixelbert": pixelbert_transform,
-    "pixelbert_randaug": pixelbert_transform_randaug,
+    "pixelbert": clip_transform,
+    "pixelbert_randaug": clip_transform,
 }
 
 
