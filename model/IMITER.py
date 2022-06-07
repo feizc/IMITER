@@ -1,7 +1,20 @@
+from turtle import forward
 import torch 
 import math 
 import torch.nn as nn 
 import torch.nn.functional as F
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, output_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
 
 
 
@@ -58,6 +71,7 @@ class IMITERSelfAttention(nn.Module):
         predict_image_m = self.imitate_image_value(text_m) 
         predict_text_m = self.imitate_text_value(image_m)
         return torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
+
 
     def compute_imitation_loss(self, key_layer, value_layer, imitate_key_layer, imitate_value_layer): 
         loss = 0 
@@ -117,5 +131,43 @@ class IMITERSelfAttention(nn.Module):
         outputs = (context_layer, imitation_loss, attention_probs) if output_attentions else (context_layer, imitation_loss,)
 
         return outputs  
+
+
+
+class IMITERSelfOutput(nn.Module):
+    """
+    The residual connection is defined in IMITERLayer instead of here (as is the case with other models), due to the
+    layernorm applied before each block.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        return hidden_states
+
+
+
+class IMITERAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.attention = IMITERSelfAttention(config)
+        self.output = IMITERSelfOutput(config)
+        
+
+    def forward(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False):
+        self_outputs = self.attention(hidden_states, attention_mask, head_mask, output_attentions)
+
+        attention_output = self.output(self_outputs[0], hidden_states)
+
+        outputs = (attention_output,) + self_outputs[1:]  # add loss if we output them
+        return outputs 
+
 
 
