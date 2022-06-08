@@ -1,4 +1,4 @@
-# vit plus bert for unified transformer representation 
+# vit plus bert for unified image text representation 
 import collections.abc
 import math
 import torch 
@@ -595,28 +595,7 @@ class ITRModel(ITRPreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
     ):
-        r"""
-        Returns:
 
-        Examples:
-
-        ```python
-        >>> from transformers import ViltProcessor, ViltModel
-        >>> from PIL import Image
-        >>> import requests
-
-        >>> # prepare image and text
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-        >>> text = "hello world"
-
-        >>> processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-mlm")
-        >>> model = ViltModel.from_pretrained("dandelin/vilt-b32-mlm")
-
-        >>> inputs = processor(image, text, return_tensors="pt")
-        >>> outputs = model(**inputs)
-        >>> last_hidden_states = outputs.last_hidden_state
-        ```"""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -714,34 +693,8 @@ class ITRForImageAndTextRetrieval(ITRPreTrainedModel):
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels are currently not supported.
-
-        Returns:
-
-        Examples:
-
-        ```python
-        >>> from transformers import ViltProcessor, ViltForImageAndTextRetrieval
-        >>> import requests
-        >>> from PIL import Image
-
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-        >>> texts = ["An image of two cats chilling on a couch", "A football player scoring a goal"]
-
-        >>> processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-finetuned-coco")
-        >>> model = ViltForImageAndTextRetrieval.from_pretrained("dandelin/vilt-b32-finetuned-coco")
-
-        >>> # prepare inputs
-        >>> encoding = processor(image, text, return_tensors="pt")
-
-        >>> # forward pass
-        >>> scores = dict()
-        >>> for text in texts:
-        ...     encoding = processor(image, text, return_tensors="pt")
-        ...     outputs = model(**encoding)
-        ...     scores[text] = outputs.logits[0, :].item()
-        ```"""
+            Labels are currently not supported. 
+        """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.vilt(
@@ -763,7 +716,12 @@ class ITRForImageAndTextRetrieval(ITRPreTrainedModel):
         logits = self.rank_output(pooler_output)
 
         output = (logits,) + outputs[2:]
-        return output
+        return output 
+    
+
+    def train_without_itr(self): 
+        for name, p in self.vilt.named_parameters(): 
+            p.requires_grad = False 
 
 
 

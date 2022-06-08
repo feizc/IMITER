@@ -1,8 +1,11 @@
-from turtle import forward
 import torch 
 import math 
 import torch.nn as nn 
 import torch.nn.functional as F
+from transformers.modeling_utils import PreTrainedModel 
+
+from .ITR import GELUActivation, ITREmbeddings
+from .model_config import IMITERConfig 
 
 
 class MLP(nn.Module):
@@ -166,8 +169,365 @@ class IMITERAttention(nn.Module):
 
         attention_output = self.output(self_outputs[0], hidden_states)
 
-        outputs = (attention_output,) + self_outputs[1:]  # add loss if we output them
+        outputs = (attention_output,) + self_outputs[1:]  # add loss at outputs[1] if we need
         return outputs 
+
+
+class IMITERIntermediate(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.intermediate_act_fn = GELUActivation()
+
+    def forward(self, hidden_states):
+
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+
+        return hidden_states  
+
+
+
+class IMITEROutput(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        hidden_states = hidden_states + input_tensor # residule connection 
+
+        return hidden_states 
+
+
+
+
+class IMITERLayer(nn.Module):
+    """This corresponds to the Block class in the timm implementation."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.attention = IMITERAttention(config)
+        self.intermediate = IMITERIntermediate(config)
+        self.output = IMITEROutput(config)
+        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False):
+        self_attention_outputs = self.attention(
+            self.layernorm_before(hidden_states),  
+            attention_mask,
+            head_mask,
+            output_attentions=output_attentions,
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        # first residual connection
+        hidden_states = attention_output + hidden_states
+
+        # layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
+
+        # second residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
+
+        outputs = (layer_output,) + outputs
+
+        return outputs
+
+
+
+
+class IMITEREncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList([IMITERLayer(config) for _ in range(config.num_hidden_layers)])
+        self.gradient_checkpointing = False
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        output_imitation_loss=True,
+        return_dict=True,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+        all_imitation_losses = 0
+
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+
+            if self.gradient_checkpointing and self.training:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return module(*inputs, output_attentions)
+
+                    return custom_forward
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(layer_module),
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                )
+            else:
+                layer_outputs = layer_module(hidden_states, attention_mask, layer_head_mask, output_attentions)
+
+            hidden_states = layer_outputs[0]
+
+            if output_imitation_loss: 
+                all_imitation_losses += layer_outputs[1]
+
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[2],) 
+            
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+
+        return tuple(v for v in [hidden_states, all_imitation_losses, all_hidden_states, all_self_attentions] if v is not None)
+        
+
+
+class IMITERPreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = IMITERConfig
+    base_model_prefix = "vilt"
+    supports_gradient_checkpointing = True
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None: 
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, IMITEREncoder):
+            module.gradient_checkpointing = value
+
+
+
+class IMITERPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+
+
+
+
+class IMITERModel(IMITERPreTrainedModel): 
+
+    def __init__(self, config, add_pooling_layer=True):
+        super().__init__(config)
+        self.config = config
+
+        self.embeddings = ITREmbeddings(config)
+        self.encoder = IMITEREncoder(config)
+
+        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.pooler = IMITERPooler(config) if add_pooling_layer else None
+
+        # Initialize weights and apply final processing
+        # self.post_init()
+
+    def get_input_embeddings(self):
+        return self.embeddings.text_embeddings.word_embeddings
+
+    def set_input_embeddings(self, value):
+        self.embeddings.text_embeddings.word_embeddings = value
+
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        pixel_values=None,
+        pixel_mask=None,
+        head_mask=None,
+        inputs_embeds=None,
+        image_embeds=None,
+        image_token_type_idx=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        output_imitation_loss=True,
+        return_dict=None,
+    ):
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict 
+
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        elif input_ids is not None:
+            input_shape = input_ids.size()
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        batch_size, seq_length = input_shape
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        if attention_mask is None:
+            attention_mask = torch.ones(((batch_size, seq_length)), device=device)
+
+        if pixel_values is None:
+            raise ValueError("You have to specify pixel_values")
+
+        batch_size, num_channels, height, width = pixel_values.shape
+        if pixel_mask is None:
+            pixel_mask = torch.ones(((batch_size, height, width)), device=device)
+
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+
+        embedding_output, attention_mask = self.embeddings(
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            pixel_values,
+            pixel_mask,
+            inputs_embeds,
+            image_embeds,
+            image_token_type_idx=image_token_type_idx,
+        )
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
+
+        encoder_outputs = self.encoder(
+            embedding_output,
+            attention_mask=extended_attention_mask,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = encoder_outputs[0] 
+        output_imitation_loss = encoder_outputs[1]
+        sequence_output = self.layernorm(sequence_output)
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+        
+        return (sequence_output, pooled_output, output_imitation_loss) + encoder_outputs[2:]
+
+
+
+
+
+class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.vilt = IMITERModel(config)
+
+        # Classifier head
+        self.rank_output = nn.Linear(config.hidden_size, 1)
+
+        # Initialize weights and apply final processing
+        # self.post_init()
+
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        pixel_values=None,
+        pixel_mask=None,
+        head_mask=None,
+        inputs_embeds=None,
+        image_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        output_imitation_loss=True,
+        return_dict=None,
+    ):
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels are currently not supported.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.vilt(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            image_embeds=image_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            output_imitation_loss=output_imitation_loss,
+            return_dict=return_dict,
+        )
+
+        pooler_output = outputs[1]
+
+        logits = self.rank_output(pooler_output)
+
+        output = (logits,) + outputs[2:]
+        return output 
+    
+
+    def train_only_imitation_network(self): 
+        for name, p in self.vilt.named_parameters(): 
+            if 'imitate' not in name: 
+                p.requires_grad = False 
+
+
+
 
 
 
