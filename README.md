@@ -12,17 +12,17 @@ Image-Text Retrieval for [COCO](https://cocodataset.org/#home) and
 Both IMITER-base and IMITER-large pre-trained checkpoints are released.
 
 
-## Requirements 
+## 1 Requirements 
 
 We only support Linux with NVIDIA GPUs. We test on Ubuntu 18.04 and V100 cards. 
 
 
-## Quick Start 
+## 2 Quick Start 
 
 We use COCO as an end-to-end example for using this code base.
 
 
-## Dataset Preparation 
+## 3 Dataset Preparation 
 See [`Dataset.md`](dataset/README.md)
 
 
