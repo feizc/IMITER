@@ -154,7 +154,7 @@ def main():
         torch.save({
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, os.path.join(train_config.ckpt_path, 'latest.pth'))
+        }, os.path.join(train_config.ckpt_path, 'itr/latest.pth'))
         break 
 
 

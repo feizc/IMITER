@@ -2,10 +2,181 @@ import torch
 import math 
 import torch.nn as nn 
 import torch.nn.functional as F
+import collections.abc 
 from transformers.modeling_utils import PreTrainedModel 
+from packaging import version 
 
-from .ITR import GELUActivation, ITREmbeddings
+from .ITR import GELUActivation, TextEmbeddings, PatchEmbeddings
 from .model_config import IMITERConfig 
+
+
+
+class IMITEREmbeddings(nn.Module):
+    """
+    Construct the text and patch embeddings, respectively.
+
+    Text embeddings are equivalent to BERT embeddings.
+
+    Patch embeddings are equivalent to ViT embeddings.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+
+        # Text embeddings
+        self.text_embeddings = TextEmbeddings(config)
+        # Patch embeddings
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        self.patch_embeddings = PatchEmbeddings(
+            image_size=config.image_size,
+            patch_size=config.patch_size,
+            num_channels=config.num_channels,
+            embed_dim=config.hidden_size,
+        )
+        num_patches = self.patch_embeddings.num_patches
+        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
+        # modality type (text/patch) embeddings
+        self.token_type_embeddings = nn.Embedding(config.modality_type_vocab_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.config = config
+
+    def visual_embed(self, pixel_values, pixel_mask, max_image_length=200):
+        _, _, ph, pw = self.patch_embeddings.projection.weight.shape
+
+        x = self.patch_embeddings(pixel_values)
+        x_mask = pixel_mask[:, None, :, :].float()
+        x_mask = nn.functional.interpolate(x_mask, size=(x.shape[2], x.shape[3])).long()
+        x_h = x_mask[:, 0].sum(dim=1)[:, 0]
+        x_w = x_mask[:, 0].sum(dim=2)[:, 0]
+
+        batch_size, num_channels, height, width = x.shape
+        patch_dim = self.config.image_size // self.config.patch_size
+        spatial_pos = self.position_embeddings[:, 1:, :].transpose(1, 2).view(1, num_channels, patch_dim, patch_dim)
+        pos_embed = torch.cat(
+            [
+                nn.functional.pad(
+                    nn.functional.interpolate(
+                        spatial_pos,
+                        size=(h, w),
+                        mode="bilinear",
+                        align_corners=True,
+                    ),
+                    (0, width - w, 0, height - h),
+                )
+                for h, w in zip(x_h, x_w)
+            ],
+            dim=0,
+        )
+
+        pos_embed = pos_embed.flatten(2).transpose(1, 2)
+        x = x.flatten(2).transpose(1, 2)
+        patch_index = torch.stack(
+            torch.meshgrid(torch.arange(x_mask.shape[-2]), torch.arange(x_mask.shape[-1]), indexing="ij"), dim=-1
+        )
+        patch_index = patch_index[None, None, :, :, :]
+        patch_index = patch_index.expand(x_mask.shape[0], x_mask.shape[1], -1, -1, -1)
+        patch_index = patch_index.flatten(1, 3)
+        x_mask = x_mask.flatten(1)
+
+        if max_image_length < 0 or max_image_length is None or not isinstance(max_image_length, int):
+            # suppose aug is 800 x 1333, then, maximum effective res is 800 x 1333 (if one side gets bigger, the other will be constrained and be shrinked)
+            # (800 // self.patch_size) * (1333 // self.patch_size) is the maximum number of patches that single image can get.
+            # if self.patch_size = 32, 25 * 41 = 1025
+            # if res is 384 x 640, 12 * 20 = 240
+            effective_resolution = x_h * x_w
+            max_image_length = effective_resolution.max()
+        else:
+            effective_resolution = x_h * x_w
+            max_image_length = min(effective_resolution.max(), max_image_length)
+
+        valid_idx = x_mask.nonzero(as_tuple=False)
+        non_valid_idx = (1 - x_mask).nonzero(as_tuple=False)
+        unique_rows = valid_idx[:, 0].unique()
+        valid_row_idx = [valid_idx[valid_idx[:, 0] == u] for u in unique_rows]
+        non_valid_row_idx = [non_valid_idx[non_valid_idx[:, 0] == u] for u in unique_rows]
+
+        valid_nums = [v.size(0) for v in valid_row_idx]
+        non_valid_nums = [v.size(0) for v in non_valid_row_idx]
+        pad_nums = [max_image_length - v for v in valid_nums]
+
+        select = list()
+        for i, (v, nv, p) in enumerate(zip(valid_nums, non_valid_nums, pad_nums)):
+            if p <= 0:
+                valid_choice = torch.multinomial(torch.ones(v).float(), max_image_length)
+                select.append(valid_row_idx[i][valid_choice])
+            else:
+                pad_choice = torch.multinomial(torch.ones(nv).float(), p, replacement=True)
+                select.append(torch.cat([valid_row_idx[i], non_valid_row_idx[i][pad_choice]], dim=0))
+
+        select = torch.cat(select, dim=0)
+        x = x[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels)
+        x_mask = x_mask[select[:, 0], select[:, 1]].view(batch_size, -1)
+        patch_index = patch_index[select[:, 0], select[:, 1]].view(batch_size, -1, 2)
+        pos_embed = pos_embed[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels)
+
+        #cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        #x = torch.cat((cls_tokens, x), dim=1)
+        #pos_embed = torch.cat(
+        #    (self.position_embeddings[:, 0, :][:, None, :].expand(batch_size, -1, -1), pos_embed), dim=1
+        #)
+        x = x + pos_embed
+        x = self.dropout(x)
+
+        # x_mask = torch.cat([torch.ones(x_mask.shape[0], 1).to(x_mask), x_mask], dim=1)
+
+        return x, x_mask, (patch_index, (height, width))
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        token_type_ids,
+        pixel_values,
+        pixel_mask,
+        inputs_embeds,
+        image_embeds,
+        image_token_type_idx=1,
+    ):
+        # PART 1: text embeddings
+        text_embeds = self.text_embeddings(
+            input_ids=input_ids, token_type_ids=token_type_ids, inputs_embeds=inputs_embeds
+        )
+
+        # PART 2: patch embeddings (with interpolated position encodings)
+        if image_embeds is None:
+            image_embeds, image_masks, patch_index = self.visual_embed(
+                pixel_values, pixel_mask, max_image_length=self.config.max_image_length
+            )
+        else:
+            image_masks = pixel_mask.flatten(1)
+
+        # PART 3: add modality type embeddings
+        # 0 indicates text, 1 indicates image, 2 is optionally used when a second image is provided (NLVR2)
+        if image_token_type_idx is None:
+            image_token_type_idx = 1
+        text_embeds = text_embeds + self.token_type_embeddings(
+            torch.zeros_like(attention_mask, dtype=torch.long, device=text_embeds.device)
+        )
+        image_embeds = image_embeds + self.token_type_embeddings(
+            torch.full_like(image_masks, image_token_type_idx, dtype=torch.long, device=text_embeds.device)
+        )
+
+        
+        # PART 4: concatenate  (bsz, max_len, hidden_state), (bsz, 384/32, hidden_state)
+        embeddings = torch.cat([text_embeds, image_embeds], dim=1)
+        masks = torch.cat([attention_mask, image_masks], dim=1)
+
+        # PART 5: add cls tokens 
+        # we add cls token here to unfiy the different modality 
+        batch_size = embeddings.size(0) 
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1) 
+        embeddings = torch.cat((cls_tokens, embeddings), dim=1) 
+        masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
+
+
+        return embeddings, masks
+
+
 
 
 class MLP(nn.Module):
@@ -35,7 +206,7 @@ class IMITERSelfAttention(nn.Module):
 
         self.text_seq_len = config.max_position_embeddings 
         num_patch = int(config.image_size / config.patch_size) 
-        self.image_seq_len = num_patch * num_patch + 1  # One token for global fusion 
+        self.image_seq_len = num_patch * num_patch
 
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
@@ -48,10 +219,10 @@ class IMITERSelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob) 
 
         # Imitation for image and text fusion 
-        self.imitate_text_key = nn.Linear(self.image_seq_len, self.text_seq_len) 
-        self.imitate_text_value = nn.Linear(self.image_seq_len, self.text_seq_len) 
-        self.imitate_image_key = nn.Linear(self.text_seq_len, self.image_seq_len) 
-        self.imitate_image_value = nn.Linear(self.text_seq_len, self.image_seq_len)
+        self.imitate_text_key = nn.Linear(self.image_seq_len + 1, self.text_seq_len) 
+        self.imitate_text_value = nn.Linear(self.image_seq_len + 1, self.text_seq_len) 
+        self.imitate_image_key = nn.Linear(self.text_seq_len + 1, self.image_seq_len) 
+        self.imitate_image_value = nn.Linear(self.text_seq_len + 1, self.image_seq_len)
 
 
     def transpose_for_scores(self, x):
@@ -62,18 +233,18 @@ class IMITERSelfAttention(nn.Module):
 
     def imitate_key_matrix(self, key_layer): 
         t_key_layer = key_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, L_text+L_image)
-        text_m, image_m = torch.split(t_key_layer, (self.text_seq_len, self.image_seq_len), dim=-1) 
-        predict_image_m = self.imitate_image_key(text_m) 
-        predict_text_m = self.imitate_text_key(image_m)
-        return torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
+        cls_m, text_m, image_m = torch.split(t_key_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
+        predict_image_m = self.imitate_image_key(torch.cat((cls_m, text_m), dim=-1)) 
+        predict_text_m = self.imitate_text_key(torch.cat((cls_m,image_m), dim=-1))
+        return torch.cat((cls_m,predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
 
 
     def imitate_value_matrix(self, value_layer): 
         t_value_layer = value_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, L_text+L_image)
-        text_m, image_m = torch.split(t_value_layer, (self.text_seq_len, self.image_seq_len), dim=-1) 
-        predict_image_m = self.imitate_image_value(text_m) 
-        predict_text_m = self.imitate_text_value(image_m)
-        return torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
+        cls_m, text_m, image_m = torch.split(t_value_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
+        predict_image_m = self.imitate_image_value(torch.cat((cls_m, text_m), dim=-1)) 
+        predict_text_m = self.imitate_text_value(torch.cat((cls_m,image_m), dim=-1))
+        return torch.cat((cls_m, predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
 
 
     def compute_imitation_loss(self, key_layer, value_layer, imitate_key_layer, imitate_value_layer): 
@@ -362,7 +533,7 @@ class IMITERModel(IMITERPreTrainedModel):
         super().__init__(config)
         self.config = config
 
-        self.embeddings = ITREmbeddings(config)
+        self.embeddings = IMITEREmbeddings(config)
         self.encoder = IMITEREncoder(config)
 
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
