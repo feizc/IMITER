@@ -361,7 +361,7 @@ def _convert_image_to_rgb(image):
     return image.convert("RGB") 
 
 
-def clip_transform(size=224):
+def clip_transform(size=384):
     return transforms.Compose([
         transforms.Resize(size, interpolation=BICUBIC),
         transforms.CenterCrop(size),
@@ -378,6 +378,6 @@ _transforms = {
 }
 
 
-def keys_to_transforms(keys: list, size=224):
+def keys_to_transforms(keys: list, size=384):
     return [_transforms[key](size=size) for key in keys]
 

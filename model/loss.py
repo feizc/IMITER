@@ -18,6 +18,7 @@ def cost_matrix_cosine(x, y, eps=1e-5):
 
 
 def compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss=False): 
+    device = train_config.device 
     _bs, _c, _h, _w = batch['image'][0].shape 
     false_len = train_config.draw_false_text 
     text_ids = torch.stack(
@@ -35,9 +36,9 @@ def compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss
     images = batch["image"][0].unsqueeze(1).expand(_bs, false_len + 1, _c, _h, _w) 
 
     infer = model(
-        pixel_values = rearrange(images, "bs fs c h w -> (bs fs) c h w"),
-        input_ids = rearrange(text_ids, "bs fs tl -> (bs fs) tl"),
-        attention_mask = rearrange(text_masks, "bs fs tl -> (bs fs) tl"),
+        pixel_values = rearrange(images, "bs fs c h w -> (bs fs) c h w").to(device),
+        input_ids = rearrange(text_ids, "bs fs tl -> (bs fs) tl").to(device),
+        attention_mask = rearrange(text_masks, "bs fs tl -> (bs fs) tl").to(device),
     )
     score = infer[0][:, 0] 
     score = rearrange(score, "(bs fs) -> bs fs", bs=_bs, fs=false_len + 1)

@@ -8,6 +8,7 @@ from dataset import CocoConfig, CocoDataLoader
 from model import IMITERForImageAndTextRetrieval, compute_image_text_retrieval_loss
 
 
+
 def train(model, train_loader, optimizer, train_config, epoch): 
     model.train() 
     iteration = 0 
