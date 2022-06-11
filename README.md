@@ -19,7 +19,7 @@ We only support Linux with NVIDIA GPUs. We test on Ubuntu 18.04 and V100 cards.
 
 ## 2 Quick Start 
 
-We use COCO as an end-to-end example for using this code base.
+We use image-text retrival in COCO dataset as an end-to-end example for using this code base.
 
 
 ## 3 Dataset Preparation 
