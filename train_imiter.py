@@ -1,7 +1,7 @@
-# fine tunning for imitative mixed image text representation 
+# fine tunning for imitative mixed image text representation with dual encoder 
 import torch  
 import os 
-from transformers import AdamW
+import functools 
 from tqdm import tqdm 
 
 from dataset import CocoConfig, CocoDataLoader
@@ -29,6 +29,108 @@ def train(model, train_loader, optimizer, train_config, epoch):
             break
 
 
+# evaluate performance with dual encoder form 
+def eval(model, data_loader, train_config): 
+    text_dataset = data_loader.make_no_false_val_dataset() 
+    tokenizer = train_config.tokenizer 
+    text_loader = torch.utils.data.DataLoader(
+        text_dataset, 
+        batch_size=16, 
+        pin_memory=True, 
+        collate_fn=functools.partial(
+            data_loader.train_dataset.collate,
+            mlm_collator=data_loader.mlm_collator,
+        ),
+    ) 
+
+    image_dataset = data_loader.make_no_false_val_dataset(image_only=True) 
+    image_loader = torch.utils.data.DataLoader(
+        image_dataset, 
+        batch_size=1, 
+        pin_memory=True, 
+        collate_fn=functools.partial(
+            data_loader.train_dataset.collate,
+            mlm_collator=data_loader.mlm_collator,
+        ),
+    )
+
+    text_preload = list()
+    for _b in tqdm(text_loader, desc="text prefetch loop"): 
+        with torch.no_grad():
+            text_features = model.step(
+                input_ids = _b["text_ids"].to(train_config.device),
+                attention_mask = _b["text_masks"].to(train_config.device),
+            )
+        text_preload.append(
+            {
+                "text_features": text_features,
+                "img_index": _b["img_index"],
+            }
+        ) 
+        break 
+
+    tiids = list()
+    cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
+    for pre in text_preload:
+        tiids += pre["img_index"]
+    tiids = torch.tensor(tiids) 
+
+    rank_scores = list() 
+    rank_iids = list() 
+
+    for _b in tqdm(image_loader, desc='rank loop'): 
+        pixel_values = _b['image'][0] 
+        with torch.no_grad(): 
+            image_features = model.step(
+                pixel_values = pixel_values
+            ) 
+
+        image_batch_score = list()
+        for text_batch in text_preload: 
+            score = cos_similarity(image_features, text_batch['text_features']) 
+            image_batch_score.append(score) 
+
+        image_batch_score = torch.cat(image_batch_score) 
+        rank_scores.append(image_batch_score.cpu().tolist())
+        rank_iids.append(_b['img_index'][0])
+        
+        break 
+
+    iids = torch.tensor(rank_iids)
+    iids = iids.view(-1)
+    scores = torch.tensor(rank_scores)
+    scores = scores.view(len(iids), -1) 
+
+    topk1 = scores.topk(1, dim=1)
+    topk1_iids = tiids[topk1.indices]
+    tr_r1 = (iids.unsqueeze(1) == topk1_iids).float().max(dim=1)[0].mean()
+    topk1 = scores.topk(1, dim=0)
+    topk1_iids = iids[topk1.indices]
+    ir_r1 = (tiids.unsqueeze(0) == topk1_iids).float().max(dim=0)[0].mean()
+    output = (ir_r1, tr_r1)
+
+
+    if train_config.report_all_merics == True:
+
+        topk10 = scores.topk(10, dim=1)
+        topk5 = scores.topk(5, dim=1)
+        topk10_iids = tiids[topk10.indices]
+        topk5_iids = tiids[topk5.indices]
+        tr_r10 = (iids.unsqueeze(1) == topk10_iids).float().max(dim=1)[0].mean()
+        tr_r5 = (iids.unsqueeze(1) == topk5_iids).float().max(dim=1)[0].mean()
+
+        topk10 = scores.topk(10, dim=0)
+        topk5 = scores.topk(5, dim=0)
+        topk10_iids = iids[topk10.indices]
+        topk5_iids = iids[topk5.indices]
+        ir_r10 = (tiids.unsqueeze(0) == topk10_iids).float().max(dim=0)[0].mean()
+        ir_r5 = (tiids.unsqueeze(0) == topk5_iids).float().max(dim=0)[0].mean()
+
+        output += (ir_r5, ir_r10, tr_r5, tr_r10)
+
+    return output 
+
+
 
 def main(): 
     train_config = CocoConfig() 
@@ -39,10 +141,11 @@ def main():
     model = model.to(train_config.device) 
     model.train_only_imitation_network()
     
-    optimizer = AdamW(model.parameters(), lr=train_config.learning_rate) 
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.learning_rate) 
 
     for epoch in range(train_config.max_epoch): 
-        train(model, train_loader, optimizer, train_config, epoch) 
+        # train(model, train_loader, optimizer, train_config, epoch) 
+        eval(model, data_loader, train_config)
 
         torch.save({
             'state_dict': model.state_dict(),

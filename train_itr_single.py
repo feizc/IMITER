@@ -1,4 +1,4 @@
-# fine tunning for universal image text representation 
+# fine tunning for universal image text representation with single encoder 
 import torch 
 import random 
 import os 

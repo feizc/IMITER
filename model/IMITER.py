@@ -174,7 +174,57 @@ class IMITEREmbeddings(nn.Module):
         masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
 
 
-        return embeddings, masks
+        return embeddings, masks 
+
+    # forward with image or text single modality
+    def step(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        pixel_values=None,
+        pixel_mask=None,
+        image_token_type_idx=1, 
+    ): 
+        if input_ids is None and pixel_values is None:
+            raise ValueError("At least one modality information is required!")
+        if input_ids is not None and pixel_values is not None: 
+            raise ValueError("At most one modality information is required!")
+
+
+
+        if input_ids is not None:
+            text_embeds = self.text_embeddings(
+                input_ids=input_ids, token_type_ids=token_type_ids, 
+            )
+            embeddings = text_embeds + self.token_type_embeddings(
+                torch.zeros_like(attention_mask, dtype=torch.long, device=text_embeds.device)
+            )
+            masks = attention_mask
+
+        if pixel_values is not None: 
+            image_embeds, image_masks, patch_index = self.visual_embed(
+                pixel_values, pixel_mask, max_image_length=self.config.max_image_length
+            )
+
+            if image_token_type_idx is None:
+                image_token_type_idx = 1 
+        
+            embeddings = image_embeds + self.token_type_embeddings(
+                torch.full_like(image_masks, image_token_type_idx, dtype=torch.long, device=image_embeds.device)
+            )
+            masks = image_masks 
+
+
+        # add cls tokens 
+        batch_size = embeddings.size(0) 
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1) 
+        embeddings = torch.cat((cls_tokens, embeddings), dim=1) 
+        masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
+
+        return embeddings, masks 
+
+
 
 
 
@@ -231,20 +281,42 @@ class IMITERSelfAttention(nn.Module):
         return x.permute(0, 2, 1, 3) 
 
 
-    def imitate_key_matrix(self, key_layer): 
-        t_key_layer = key_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, L_text+L_image)
-        cls_m, text_m, image_m = torch.split(t_key_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
-        predict_image_m = self.imitate_image_key(torch.cat((cls_m, text_m), dim=-1)) 
-        predict_text_m = self.imitate_text_key(torch.cat((cls_m,image_m), dim=-1))
-        return torch.cat((cls_m,predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
+    def imitate_key_matrix(self, key_layer, image_modality=True, text_modality=True): 
+        t_key_layer = key_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text+L_image+1, L_text+1, L_image+1}) 
+
+        if image_modality == True and text_modality == True: 
+            cls_m, text_m, image_m = torch.split(t_key_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
+            predict_image_m = self.imitate_image_key(torch.cat((cls_m, text_m), dim=-1)) 
+            predict_text_m = self.imitate_text_key(torch.cat((cls_m,image_m), dim=-1))
+            imitate_key = torch.cat((cls_m,predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
+        elif image_modality == True and text_modality == False: 
+            predict_text_m = self.imitate_text_key(t_key_layer) 
+            imitate_key = torch.cat((t_key_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
+        elif image_modality == False and text_modality == True: 
+            predict_image_m = self.imitate_image_key(t_key_layer) 
+            imitate_key = torch.cat((t_key_layer, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
+        else: 
+            raise ValueError("At least one modality information is required for imitation!") 
+        return imitate_key 
 
 
-    def imitate_value_matrix(self, value_layer): 
-        t_value_layer = value_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, L_text+L_image)
-        cls_m, text_m, image_m = torch.split(t_value_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
-        predict_image_m = self.imitate_image_value(torch.cat((cls_m, text_m), dim=-1)) 
-        predict_text_m = self.imitate_text_value(torch.cat((cls_m,image_m), dim=-1))
-        return torch.cat((cls_m, predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
+    def imitate_value_matrix(self, value_layer, image_modality=True, text_modality=True): 
+        t_value_layer = value_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text+L_image+1, L_text+1, L_image+1})
+        
+        if image_modality == True and text_modality == True: 
+            cls_m, text_m, image_m = torch.split(t_value_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
+            predict_image_m = self.imitate_image_value(torch.cat((cls_m, text_m), dim=-1)) 
+            predict_text_m = self.imitate_text_value(torch.cat((cls_m,image_m), dim=-1))
+            imitate_value = torch.cat((cls_m, predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
+        elif image_modality == True and text_modality == False: 
+            predict_text_m = self.imitate_text_value(t_value_layer) 
+            imitate_value = torch.cat((t_value_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
+        elif image_modality == False and text_modality == True: 
+            predict_image_m = self.imitate_image_key(t_value_layer) 
+            imitate_value = torch.cat((t_value_layer, predict_image_m), dim=-1).permute(0, 1, 3, 2)  
+        else: 
+            raise ValueError("At least one modality information is required for imitation!") 
+        return imitate_value 
 
 
     def compute_imitation_loss(self, key_layer, value_layer, imitate_key_layer, imitate_value_layer): 
@@ -307,6 +379,67 @@ class IMITERSelfAttention(nn.Module):
         return outputs  
 
 
+    # inference with imitation features
+    def step(
+        self, 
+        hidden_states, 
+        attention_mask=None, 
+        head_mask=None, 
+        output_attentions=False, 
+        image_modality=True, # forward hidden state from image or text 
+        predicted_usage=True, # Use the imitated key, value forward 
+    ):
+        mixed_query_layer = self.query(hidden_states)
+
+        key_layer = self.transpose_for_scores(self.key(hidden_states))
+        value_layer = self.transpose_for_scores(self.value(hidden_states))
+        query_layer = self.transpose_for_scores(mixed_query_layer) 
+
+        imitate_key_layer = self.imitate_key_matrix(key_layer, image_modality=image_modality, text_modality=not image_modality) 
+        imitate_value_layer = self.imitate_value_matrix(value_layer, image_modality=image_modality, text_modality=not image_modality) 
+
+        if predicted_usage == True: 
+            key_layer = imitate_key_layer 
+            value_layer = imitate_value_layer
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2)) 
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size) 
+        
+        if attention_mask is not None: 
+            bsz = attention_mask.size(0)
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            if image_modality == True: 
+                attention_mask = torch.cat((attention_mask, torch.ones(bsz, 1, 1, self.text_seq_len).to(hidden_states.device)), dim=-1) 
+            else:
+                attention_mask = torch.cat((attention_mask, torch.ones(bsz, 1, 1, self.image_seq_len).to(hidden_states.device)), dim=-1) 
+            # attention_mask = attention_mask.bool()
+            # attention_scores = attention_scores.masked_fill(~attention_mask, float("-inf"))
+            attention_scores = attention_scores + attention_mask 
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores) 
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        # Mask heads if we want to
+        if head_mask is not None:
+            attention_probs = attention_probs * head_mask
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer, )
+
+        return outputs  
+
+
+
 
 class IMITERSelfOutput(nn.Module):
     """
@@ -337,6 +470,14 @@ class IMITERAttention(nn.Module):
 
     def forward(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False):
         self_outputs = self.attention(hidden_states, attention_mask, head_mask, output_attentions)
+
+        attention_output = self.output(self_outputs[0], hidden_states)
+
+        outputs = (attention_output,) + self_outputs[1:]  # add loss at outputs[1] if we need
+        return outputs 
+
+    def step(self, hidden_states, attention_mask=None, head_mask=None, output_attentions=False, image_modality=True, predicted_usage=True):
+        self_outputs = self.attention.step(hidden_states, attention_mask, head_mask, output_attentions, image_modality, predicted_usage)
 
         attention_output = self.output(self_outputs[0], hidden_states)
 
@@ -395,6 +536,40 @@ class IMITERLayer(nn.Module):
             attention_mask,
             head_mask,
             output_attentions=output_attentions,
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        # first residual connection
+        hidden_states = attention_output + hidden_states
+
+        # layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
+
+        # second residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
+
+        outputs = (layer_output,) + outputs
+
+        return outputs 
+    
+
+    def step(self, 
+            hidden_states, 
+            attention_mask=None, 
+            head_mask=None, 
+            output_attentions=False,
+            image_modality=True, 
+            predicted_usage=True,
+        ):
+        self_attention_outputs = self.attention.step(
+            self.layernorm_before(hidden_states),  
+            attention_mask,
+            head_mask,
+            output_attentions=output_attentions,
+            image_modality=image_modality, 
+            predicted_usage=predicted_usage,
         )
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
@@ -474,7 +649,47 @@ class IMITEREncoder(nn.Module):
 
 
         return tuple(v for v in [hidden_states, all_imitation_losses, all_hidden_states, all_self_attentions] if v is not None)
+    
+
+    def step(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        image_modality=True, 
+        predicted_usage=True,
+    ):  
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
         
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+
+            
+            layer_outputs = layer_module.step(hidden_states, attention_mask, layer_head_mask, output_attentions, image_modality, predicted_usage)
+
+            hidden_states = layer_outputs[0]
+
+
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[2],) 
+            
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+
+        return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
+    
+
+
+
+
 
 
 class IMITERPreTrainedModel(PreTrainedModel):
@@ -628,10 +843,82 @@ class IMITERModel(IMITERPreTrainedModel):
         sequence_output = self.layernorm(sequence_output)
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
         
-        return (sequence_output, pooled_output, output_imitation_loss) + encoder_outputs[2:]
+        return (sequence_output, pooled_output, output_imitation_loss) + encoder_outputs[2:] 
+    
 
+    def step(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        pixel_values=None,
+        pixel_mask=None,
+        head_mask=None,
+        inputs_embeds=None,
+        image_embeds=None,
+        image_token_type_idx=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        predicted_usage=True,
+    ):
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict 
+        image_modality = True 
 
+        if input_ids is not None:
+            image_modality = False
+            input_shape = input_ids.size() 
+        
 
+            batch_size, seq_length = input_shape
+
+            if attention_mask is None:
+                attention_mask = torch.ones(((batch_size, seq_length)), device=input_ids.device)
+
+        if pixel_values is not None: 
+            batch_size, num_channels, height, width = pixel_values.shape
+            if pixel_mask is None:
+                pixel_mask = torch.ones((batch_size, height, width), device=pixel_values.device)
+            input_shape = (batch_size, 144)
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+
+        embedding_output, attention_mask = self.embeddings.step(
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            pixel_values,
+            pixel_mask,
+            image_token_type_idx=image_token_type_idx, 
+        )
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, attention_mask.device)
+
+        encoder_outputs = self.encoder.step(
+            embedding_output,
+            attention_mask=extended_attention_mask,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            image_modality=image_modality,
+            predicted_usage=predicted_usage
+        )
+        sequence_output = encoder_outputs[0] 
+        sequence_output = self.layernorm(sequence_output)
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+        
+        return (sequence_output, pooled_output,) + encoder_outputs[2:] 
+    
 
 
 class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
@@ -691,6 +978,38 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
         output = (logits,) + outputs[2:]
         return output 
     
+    def step(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        pixel_values=None,
+        pixel_mask=None,
+        head_mask=None,
+        inputs_embeds=None,
+        image_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.vilt.step(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            image_embeds=image_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        return outputs[1] 
+
 
     def train_only_imitation_network(self): 
         for name, p in self.vilt.named_parameters(): 

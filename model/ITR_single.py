@@ -313,8 +313,10 @@ class ITRSelfAttention(nn.Module):
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         if attention_mask is not None:
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-            attention_scores = attention_scores + attention_mask
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function) 
+            #attention_mask = attention_mask.bool() 
+            #attention_scores = attention_scores.masked_fill(~attention_mask, float("-inf"))
+            attention_scores = attention_scores + attention_mask 
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
