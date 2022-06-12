@@ -28,7 +28,10 @@ def test_itr(image, texts):
 
 
 # single encoder for image text representation 
-def test_imiter_combine(image, texts): 
+def test_imiter_combine(image, texts, dual_flag=False): 
+    """
+    dual_flag: 
+    """
     bert_path = './ckpt/bert' 
     tokenizer = BertTokenizer.from_pretrained(bert_path, do_lower_case='uncased')  
     model_config = IMITERConfig()
@@ -48,16 +51,12 @@ def test_imiter_combine(image, texts):
             truncation=True,
             max_length=40,
         )
-        
-        data['input_ids'] = torch.Tensor(input_dict['input_ids']).long().unsqueeze(0) 
-
-        data['attention_mask'] = torch.Tensor(input_dict['attention_mask']).long().unsqueeze(0)
-        outputs = model(**data) 
-        scores[text] = outputs[0].item() 
+        if dual_flag == False: 
+            data['input_ids'] = torch.Tensor(input_dict['input_ids']).long().unsqueeze(0) 
+            data['attention_mask'] = torch.Tensor(input_dict['attention_mask']).long().unsqueeze(0)
+            outputs = model(**data) 
+            scores[text] = outputs[0].item() 
     print(scores)
-
-
-
 
 
 
@@ -67,5 +66,5 @@ if __name__ == "__main__":
     image = Image.open(requests.get(url, stream=True).raw)
     texts = ["An image of two cats chilling on a couch", "A football player scoring a goal"]
 
-    test_itr(image, texts) 
-    # test_imiter_combine(image, texts) 
+    # test_itr(image, texts) 
+    test_imiter_combine(image, texts) 
