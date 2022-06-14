@@ -8,6 +8,7 @@ from packaging import version
 
 from .ITR_single import GELUActivation, TextEmbeddings, PatchEmbeddings
 from .model_config import IMITERConfig 
+from .loss import contrastive_loss 
 
 
 

@@ -17,6 +17,19 @@ def cost_matrix_cosine(x, y, eps=1e-5):
     return cosine_dist 
 
 
+# referring CLIP for batch constrative loss
+def _classify_loss(logits: torch.Tensor) -> torch.Tensor:
+    return nn.functional.cross_entropy(logits, torch.arange(len(logits), device=logits.device))
+
+
+def contrastive_loss(similarity: torch.Tensor) -> torch.Tensor:
+    caption_loss = _classify_loss(similarity)
+    image_loss = _classify_loss(similarity.t())
+    return (caption_loss + image_loss) / 2.0 
+
+
+
+
 def compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss=False): 
     device = train_config.device 
     _bs, _c, _h, _w = batch['image'][0].shape 
