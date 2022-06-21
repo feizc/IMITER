@@ -8,7 +8,7 @@ from packaging import version
 
 from .ITR_single import GELUActivation, TextEmbeddings, PatchEmbeddings
 from .model_config import IMITERConfig 
-from .loss import contrastive_loss 
+from .loss import contrastive_loss, accuracy_compute
 
 
 
@@ -27,7 +27,8 @@ class IMITEREmbeddings(nn.Module):
         # Text embeddings
         self.text_embeddings = TextEmbeddings(config)
         # Patch embeddings
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        self.image_cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size)) 
+        self.text_cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size)) 
         self.patch_embeddings = PatchEmbeddings(
             image_size=config.image_size,
             patch_size=config.patch_size,
@@ -115,15 +116,16 @@ class IMITEREmbeddings(nn.Module):
         patch_index = patch_index[select[:, 0], select[:, 1]].view(batch_size, -1, 2)
         pos_embed = pos_embed[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels)
 
-        #cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        #x = torch.cat((cls_tokens, x), dim=1)
-        #pos_embed = torch.cat(
-        #    (self.position_embeddings[:, 0, :][:, None, :].expand(batch_size, -1, -1), pos_embed), dim=1
-        #)
+        # image cls token is concatenated here 
+        cls_tokens = self.image_cls_token.expand(batch_size, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        pos_embed = torch.cat(
+            (self.position_embeddings[:, 0, :][:, None, :].expand(batch_size, -1, -1), pos_embed), dim=1
+        )
         x = x + pos_embed
         x = self.dropout(x)
 
-        # x_mask = torch.cat([torch.ones(x_mask.shape[0], 1).to(x_mask), x_mask], dim=1)
+        x_mask = torch.cat([torch.ones(x_mask.shape[0], 1).to(x_mask), x_mask], dim=1)
 
         return x, x_mask, (patch_index, (height, width))
 
@@ -170,10 +172,9 @@ class IMITEREmbeddings(nn.Module):
         # PART 5: add cls tokens 
         # we add cls token here to unfiy the different modality 
         batch_size = embeddings.size(0) 
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1) 
+        cls_tokens = self.text_cls_token.expand(batch_size, -1, -1) 
         embeddings = torch.cat((cls_tokens, embeddings), dim=1) 
         masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
-
 
         return embeddings, masks 
 
@@ -203,6 +204,12 @@ class IMITEREmbeddings(nn.Module):
             )
             masks = attention_mask
 
+            # add text cls tokens 
+            batch_size = embeddings.size(0) 
+            cls_tokens = self.text_cls_token.expand(batch_size, -1, -1) 
+            embeddings = torch.cat((cls_tokens, embeddings), dim=1) 
+            masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
+
         if pixel_values is not None: 
             image_embeds, image_masks, patch_index = self.visual_embed(
                 pixel_values, pixel_mask, max_image_length=self.config.max_image_length
@@ -216,12 +223,6 @@ class IMITEREmbeddings(nn.Module):
             )
             masks = image_masks 
 
-
-        # add cls tokens 
-        batch_size = embeddings.size(0) 
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1) 
-        embeddings = torch.cat((cls_tokens, embeddings), dim=1) 
-        masks = torch.cat([torch.ones(masks.shape[0], 1).to(masks), masks], dim=1)
 
         return embeddings, masks 
 
@@ -270,10 +271,10 @@ class IMITERSelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob) 
 
         # Imitation for image and text fusion 
-        self.imitate_text_key = nn.Linear(self.image_seq_len + 1, self.text_seq_len) 
-        self.imitate_text_value = nn.Linear(self.image_seq_len + 1, self.text_seq_len) 
-        self.imitate_image_key = nn.Linear(self.text_seq_len + 1, self.image_seq_len) 
-        self.imitate_image_value = nn.Linear(self.text_seq_len + 1, self.image_seq_len)
+        self.imitate_text_key = nn.Linear(self.image_seq_len + 1, self.text_seq_len + 1) 
+        self.imitate_text_value = nn.Linear(self.image_seq_len + 1, self.text_seq_len + 1) 
+        self.imitate_image_key = nn.Linear(self.text_seq_len + 1, self.image_seq_len + 1) 
+        self.imitate_image_value = nn.Linear(self.text_seq_len + 1, self.image_seq_len + 1)
 
 
     def transpose_for_scores(self, x):
@@ -283,13 +284,13 @@ class IMITERSelfAttention(nn.Module):
 
 
     def imitate_key_matrix(self, key_layer, image_modality=True, text_modality=True): 
-        t_key_layer = key_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text+L_image+1, L_text+1, L_image+1}) 
+        t_key_layer = key_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text + 1 +L_image+1, L_text+1, L_image+1}) 
 
         if image_modality == True and text_modality == True: 
-            cls_m, text_m, image_m = torch.split(t_key_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
-            predict_image_m = self.imitate_image_key(torch.cat((cls_m, text_m), dim=-1)) 
-            predict_text_m = self.imitate_text_key(torch.cat((cls_m,image_m), dim=-1))
-            imitate_key = torch.cat((cls_m,predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
+            text_m, image_m = torch.split(t_key_layer, (self.text_seq_len + 1, self.image_seq_len + 1), dim=-1) 
+            predict_image_m = self.imitate_image_key(text_m)
+            predict_text_m = self.imitate_text_key(image_m)
+            imitate_key = torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
         elif image_modality == True and text_modality == False: 
             predict_text_m = self.imitate_text_key(t_key_layer) 
             imitate_key = torch.cat((t_key_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
@@ -302,13 +303,13 @@ class IMITERSelfAttention(nn.Module):
 
 
     def imitate_value_matrix(self, value_layer, image_modality=True, text_modality=True): 
-        t_value_layer = value_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text+L_image+1, L_text+1, L_image+1})
+        t_value_layer = value_layer.permute(0, 1, 3, 2) # (bsz, num_head, head_size, {L_text+1 + L_image+1, L_text+1, L_image+1})
         
         if image_modality == True and text_modality == True: 
-            cls_m, text_m, image_m = torch.split(t_value_layer, (1, self.text_seq_len, self.image_seq_len), dim=-1) 
-            predict_image_m = self.imitate_image_value(torch.cat((cls_m, text_m), dim=-1)) 
-            predict_text_m = self.imitate_text_value(torch.cat((cls_m,image_m), dim=-1))
-            imitate_value = torch.cat((cls_m, predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
+            text_m, image_m = torch.split(t_value_layer, (self.text_seq_len + 1, self.image_seq_len + 1), dim=-1) 
+            predict_image_m = self.imitate_image_value(text_m)
+            predict_text_m = self.imitate_text_value(image_m)
+            imitate_value = torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
         elif image_modality == True and text_modality == False: 
             predict_text_m = self.imitate_text_value(t_value_layer) 
             imitate_value = torch.cat((t_value_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
@@ -388,7 +389,7 @@ class IMITERSelfAttention(nn.Module):
         head_mask=None, 
         output_attentions=False, 
         image_modality=True, # forward hidden state from image or text 
-        predicted_usage=True, # Use the imitated key, value forward 
+        predicted_usage=False, # Use the imitated key, value forward 
     ):
         mixed_query_layer = self.query(hidden_states)
 
@@ -409,11 +410,12 @@ class IMITERSelfAttention(nn.Module):
         
         if attention_mask is not None: 
             bsz = attention_mask.size(0)
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-            if image_modality == True: 
-                attention_mask = torch.cat((attention_mask, torch.ones(bsz, 1, 1, self.text_seq_len).to(hidden_states.device)), dim=-1) 
-            else:
-                attention_mask = torch.cat((attention_mask, torch.ones(bsz, 1, 1, self.image_seq_len).to(hidden_states.device)), dim=-1) 
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function) 
+            if predicted_usage == True: 
+                if image_modality == True: 
+                    attention_mask = torch.cat((torch.ones(bsz, 1, 1, self.text_seq_len + 1).to(hidden_states.device), attention_mask), dim=-1) 
+                else:
+                    attention_mask = torch.cat((attention_mask, torch.ones(bsz, 1, 1, self.image_seq_len + 1).to(hidden_states.device)), dim=-1) 
             # attention_mask = attention_mask.bool()
             # attention_scores = attention_scores.masked_fill(~attention_mask, float("-inf"))
             attention_scores = attention_scores + attention_mask 
@@ -679,7 +681,6 @@ class IMITEREncoder(nn.Module):
 
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[2],) 
-            
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -734,8 +735,8 @@ class IMITERPooler(nn.Module):
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
+        # first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(hidden_states)
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
@@ -755,6 +756,9 @@ class IMITERModel(IMITERPreTrainedModel):
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.pooler = IMITERPooler(config) if add_pooling_layer else None
 
+        self.text_seq_len = config.max_position_embeddings 
+        num_patch = int(config.image_size / config.patch_size) 
+        self.image_seq_len = num_patch * num_patch
         # Initialize weights and apply final processing
         # self.post_init()
 
@@ -838,13 +842,12 @@ class IMITERModel(IMITERPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-        )
-        sequence_output = encoder_outputs[0] 
-        output_imitation_loss = encoder_outputs[1]
-        sequence_output = self.layernorm(sequence_output)
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
-        
-        return (sequence_output, pooled_output, output_imitation_loss) + encoder_outputs[2:] 
+        )[0]
+        sequence_output = self.layernorm(encoder_outputs)
+        pooled_output = self.pooler(sequence_output) 
+        text_embeds = pooled_output[:, 0, :]  # (bsz, L_text+1+L_img+1, d_model)
+        image_embeds = pooled_output[:, self.text_seq_len + 1, :]
+        return (text_embeds, image_embeds, encoder_outputs[1])
     
 
     def step(
@@ -915,10 +918,12 @@ class IMITERModel(IMITERPreTrainedModel):
             predicted_usage=predicted_usage
         )
         sequence_output = encoder_outputs[0] 
+   
         sequence_output = self.layernorm(sequence_output)
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
-        
-        return (sequence_output, pooled_output,) + encoder_outputs[2:] 
+        pooled_output = self.pooler(sequence_output)[:, 0, :]
+
+
+        return (pooled_output, )
     
 
 
@@ -927,9 +932,9 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
         super().__init__(config)
 
         self.vilt = IMITERModel(config)
-
+        self.logit_scale = nn.Parameter(torch.ones([]) * self.config.logit_scale_init_value)
         # Classifier head
-        self.rank_output = nn.Linear(config.hidden_size, 1)
+        # self.rank_output = nn.Linear(config.hidden_size, 1)
 
         # Initialize weights and apply final processing
         # self.post_init()
@@ -950,6 +955,7 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
         output_hidden_states=None,
         output_imitation_loss=True,
         return_dict=None,
+        return_loss=True,
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -972,12 +978,24 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
             return_dict=return_dict,
         )
 
-        pooler_output = outputs[1]
+        text_embeds, image_embeds, imitation_loss = outputs 
+        image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+        text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
 
-        logits = self.rank_output(pooler_output)
+        # cosine similarity as logits
+        logit_scale = self.logit_scale.exp()
+        logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
+        logits_per_image = logits_per_text.t()
 
-        output = (logits,) + outputs[2:]
-        return output 
+        loss = imitation_loss
+        if return_loss: 
+            # logits_per_text.size() == logits_per_image.size() == (bsz, bsz) 
+            loss = contrastive_loss(logits_per_text)
+            accuracy = accuracy_compute(logits_per_text) 
+
+        output = (logits_per_image, logits_per_text, text_embeds, image_embeds, )
+        return ((loss, accuracy, ) + output) if loss is not None else output
+        
     
     def step(
         self,
@@ -1008,8 +1026,8 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-        )
-        return outputs[1] 
+        )[0]
+        return outputs
 
 
     def train_only_imitation_network(self): 

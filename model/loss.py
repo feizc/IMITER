@@ -28,6 +28,10 @@ def contrastive_loss(similarity: torch.Tensor) -> torch.Tensor:
     return (caption_loss + image_loss) / 2.0 
 
 
+def accuracy_compute(logits): 
+    index = torch.argmax(logits, dim=1) 
+    res = torch.eq(index.cpu(), torch.arange(len(logits)).cpu()).int()
+    return res.sum() / len(logits)
 
 
 def compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss=False): 

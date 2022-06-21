@@ -90,9 +90,9 @@ def eval(model, data_loader, train_config):
             pixel_values = pixel_values.expand(fblen, _c, _w, _h) 
             with torch.no_grad():
                 infer = model(
-                    pixel_values = pixel_values,
-                    input_ids = text_batch['text_ids'],
-                    attention_mask = text_batch["text_masks"],
+                    pixel_values = pixel_values.to(train_config.device),
+                    input_ids = text_batch['text_ids'].to(train_config.device),
+                    attention_mask = text_batch["text_masks"].to(train_config.device),
                 )[0]
             score = infer[:, 0] 
             image_batch_score.append(score) 

@@ -16,7 +16,12 @@ def train(model, train_loader, optimizer, train_config, epoch):
     with tqdm(enumerate(train_loader), total=len(train_loader)) as t:
         for idx, batch in t:  
             iteration += 1 
-            loss = compute_image_text_retrieval_loss(model, batch, train_config) 
+            loss = model(
+                pixel_values = batch['image'][0].to(train_config.device),
+                input_ids = batch['text_ids'].to(train_config.device),
+                attention_mask = batch['text_masks'].to(train_config.device),
+            )[0]
+            
             loss = loss / train_config.gradient_accumulation_steps 
             loss.backward()
             if iteration % train_config.gradient_accumulation_steps == 0: 
@@ -26,7 +31,7 @@ def train(model, train_loader, optimizer, train_config, epoch):
             loss_cum += loss.item() 
             t.set_description('Epoch %i' % epoch)
             t.set_postfix(loss=loss_cum / (idx+1))
-            break
+            # break
 
 
 # evaluate performance with dual encoder form 
@@ -79,11 +84,12 @@ def eval(model, data_loader, train_config):
     rank_iids = list() 
 
     for _b in tqdm(image_loader, desc='rank loop'): 
-        pixel_values = _b['image'][0] 
+        pixel_values = _b['image'][0].to(train_config.device)
         with torch.no_grad(): 
             image_features = model.step(
                 pixel_values = pixel_values
             ) 
+
 
         image_batch_score = list()
         for text_batch in text_preload: 
@@ -127,7 +133,7 @@ def eval(model, data_loader, train_config):
         ir_r5 = (tiids.unsqueeze(0) == topk5_iids).float().max(dim=0)[0].mean()
 
         output += (ir_r5, ir_r10, tr_r5, tr_r10)
-
+    print(output)
     return output 
 
 
@@ -139,12 +145,14 @@ def main():
 
     model = IMITERForImageAndTextRetrieval.from_pretrained(train_config.tokenizer_path) 
     model = model.to(train_config.device) 
-    model.train_only_imitation_network()
+
+    if train_config.train_only_imitation == True: 
+        model.train_only_imitation_network()
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.learning_rate) 
 
     for epoch in range(train_config.max_epoch): 
-        # train(model, train_loader, optimizer, train_config, epoch) 
+        train(model, train_loader, optimizer, train_config, epoch) 
         eval(model, data_loader, train_config)
 
         torch.save({

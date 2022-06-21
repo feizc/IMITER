@@ -282,7 +282,7 @@ class CocoDataLoader:
         self.max_text_len = config.max_text_len 
         self.draw_false_image = config.draw_false_image 
         self.draw_false_text = config.draw_false_text 
-        self.image_only = config.image_only
+        self.image_only = config.image_only 
 
         self.train_transform_keys = (
             ["default_train"]
@@ -355,7 +355,20 @@ class CocoDataLoader:
             pin_memory=True,
             collate_fn=self.collate,
         )
-        return loader
+        return loader 
+
+    def make_no_false_val_dataset(self, image_only=False): 
+        return CocoDataset(
+            self.data_dir,
+            self.val_transform_keys,
+            split="val", 
+            tokenizer=self.tokenizer, 
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=0,
+            draw_false_text=0,
+            image_only=image_only,
+        )
 
 
 
