@@ -3,6 +3,7 @@
 This is the PyTorch implementation for inference and training of the image-text models as described in: 
 > **IMITER: Imitative Mixed Image-TExt Representation learning**
 
+We target to explore the function of sinle encoder, dual encoder, and mixed encoder for image-text representation learning. 
 This repository supports finetuning IMITER on
 [NLVR2](http://lil.nlp.cornell.edu/nlvr/), [VQA](https://visualqa.org/), [VCR](https://visualcommonsense.com/),
 [SNLI-VE](https://github.com/necla-ml/SNLI-VE), 
