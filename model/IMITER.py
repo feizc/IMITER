@@ -293,7 +293,7 @@ class IMITERSelfAttention(nn.Module):
             imitate_key = torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
         elif image_modality == True and text_modality == False: 
             predict_text_m = self.imitate_text_key(t_key_layer) 
-            imitate_key = torch.cat((t_key_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
+            imitate_key = torch.cat((predict_text_m, t_key_layer), dim=-1).permute(0, 1, 3, 2) 
         elif image_modality == False and text_modality == True: 
             predict_image_m = self.imitate_image_key(t_key_layer) 
             imitate_key = torch.cat((t_key_layer, predict_image_m), dim=-1).permute(0, 1, 3, 2) 
@@ -312,7 +312,7 @@ class IMITERSelfAttention(nn.Module):
             imitate_value = torch.cat((predict_text_m, predict_image_m), dim=-1).permute(0, 1, 3, 2)
         elif image_modality == True and text_modality == False: 
             predict_text_m = self.imitate_text_value(t_value_layer) 
-            imitate_value = torch.cat((t_value_layer, predict_text_m), dim=-1).permute(0, 1, 3, 2) 
+            imitate_value = torch.cat((predict_text_m, t_value_layer), dim=-1).permute(0, 1, 3, 2) 
         elif image_modality == False and text_modality == True: 
             predict_image_m = self.imitate_image_key(t_value_layer) 
             imitate_value = torch.cat((t_value_layer, predict_image_m), dim=-1).permute(0, 1, 3, 2)  

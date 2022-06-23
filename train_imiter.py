@@ -5,7 +5,7 @@ import functools
 from tqdm import tqdm 
 
 from dataset import CocoConfig, CocoDataLoader
-from model import IMITERForImageAndTextRetrieval, compute_image_text_retrieval_loss
+from model import IMITERForImageAndTextRetrieval, compute_image_text_retrieval_loss, accuracy_compute
 
 
 
@@ -13,25 +13,28 @@ def train(model, train_loader, optimizer, train_config, epoch):
     model.train() 
     iteration = 0 
     loss_cum = 0
+    acc_cum = 0
     with tqdm(enumerate(train_loader), total=len(train_loader)) as t:
         for idx, batch in t:  
             iteration += 1 
-            loss = model(
+            outputs = model(
                 pixel_values = batch['image'][0].to(train_config.device),
                 input_ids = batch['text_ids'].to(train_config.device),
                 attention_mask = batch['text_masks'].to(train_config.device),
-            )[0]
+            )
             
-            loss = loss / train_config.gradient_accumulation_steps 
+            loss = outputs[0] / train_config.gradient_accumulation_steps 
             loss.backward()
             if iteration % train_config.gradient_accumulation_steps == 0: 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm) 
                 optimizer.step() 
                 optimizer.zero_grad() 
-            loss_cum += loss.item() 
+            loss_cum += loss.item()
+            acc_cum += outputs[1].item() 
+
             t.set_description('Epoch %i' % epoch)
-            t.set_postfix(loss=loss_cum / (idx+1))
-            # break
+            t.set_postfix(loss=loss_cum / (idx+1), acc=acc_cum/(idx+1))
+            break
 
 
 # evaluate performance with dual encoder form 
@@ -40,7 +43,7 @@ def eval(model, data_loader, train_config):
     tokenizer = train_config.tokenizer 
     text_loader = torch.utils.data.DataLoader(
         text_dataset, 
-        batch_size=16, 
+        batch_size=8, 
         pin_memory=True, 
         collate_fn=functools.partial(
             data_loader.train_dataset.collate,
@@ -60,12 +63,38 @@ def eval(model, data_loader, train_config):
     )
 
     text_preload = list()
-    for _b in tqdm(text_loader, desc="text prefetch loop"): 
-        with torch.no_grad():
-            text_features = model.step(
-                input_ids = _b["text_ids"].to(train_config.device),
-                attention_mask = _b["text_masks"].to(train_config.device),
-            )
+
+    single_acc_sum = 0 
+    dual_acc_sum = 0
+    idx = 0
+    with tqdm(text_loader, desc="text prefetch loop") as t: 
+        for _b in t:
+            idx += 1
+            with torch.no_grad():
+                text_embeds = model.step(
+                    input_ids = _b["text_ids"].to(train_config.device),
+                    attention_mask = _b["text_masks"].to(train_config.device),
+                )
+                image_embeds = model.step(
+                    pixel_values = _b['image'][0].to(train_config.device)
+                )
+                single_acc = model(
+                    input_ids = _b["text_ids"].to(train_config.device),
+                    attention_mask = _b["text_masks"].to(train_config.device),
+                    pixel_values = _b['image'][0].to(train_config.device),
+                )[1]
+                
+            logit_scale = model.logit_scale.exp()
+            logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
+            dual_acc = accuracy_compute(logits_per_text) 
+            single_acc_sum += single_acc.item()
+            dual_acc_sum += dual_acc.item()
+            t.set_postfix(loss=single_acc_sum / (idx+1), acc=dual_acc_sum/(idx+1))
+            break
+
+
+        # change here 
+    '''
         text_preload.append(
             {
                 "text_features": text_features,
@@ -135,6 +164,7 @@ def eval(model, data_loader, train_config):
         output += (ir_r5, ir_r10, tr_r5, tr_r10)
     print(output)
     return output 
+    '''
 
 
 
@@ -144,6 +174,7 @@ def main():
     train_loader = data_loader.train_dataloader()  
 
     model = IMITERForImageAndTextRetrieval.from_pretrained(train_config.tokenizer_path) 
+    model.load_state_dict(torch.load('./ckpt/imiter/latest.pth')['state_dict'])
     model = model.to(train_config.device) 
 
     if train_config.train_only_imitation == True: 
