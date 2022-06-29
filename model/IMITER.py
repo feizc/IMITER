@@ -244,6 +244,7 @@ class MLP(nn.Module):
 
 
 
+
 class IMITERSelfAttention(nn.Module): 
     r"""
     Incorporate two sets of matrices to imitate the fusion between image and text (iit), text and image (iti) 
@@ -835,19 +836,20 @@ class IMITERModel(IMITERPreTrainedModel):
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
 
-        encoder_outputs = self.encoder(
+        outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask,
             head_mask=head_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-        )[0]
+        )
+        encoder_outputs = outputs[0]
         sequence_output = self.layernorm(encoder_outputs)
         pooled_output = self.pooler(sequence_output) 
         text_embeds = pooled_output[:, 0, :]  # (bsz, L_text+1+L_img+1, d_model)
         image_embeds = pooled_output[:, self.text_seq_len + 1, :]
-        return (text_embeds, image_embeds, encoder_outputs[1])
+        return (text_embeds, image_embeds, outputs[1])
     
 
     def step(
@@ -990,7 +992,7 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
         loss = imitation_loss
         if return_loss: 
             # logits_per_text.size() == logits_per_image.size() == (bsz, bsz) 
-            loss = contrastive_loss(logits_per_text)
+            loss += contrastive_loss(logits_per_text)
             accuracy = accuracy_compute(logits_per_text) 
 
         output = (logits_per_image, logits_per_text, text_embeds, image_embeds, )

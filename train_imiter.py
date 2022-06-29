@@ -174,7 +174,8 @@ def main():
     train_loader = data_loader.train_dataloader()  
 
     model = IMITERForImageAndTextRetrieval.from_pretrained(train_config.tokenizer_path) 
-    model.load_state_dict(torch.load('./ckpt/imiter/latest.pth')['state_dict'])
+    if train_config.resume_flag == True: 
+        model.load_state_dict(torch.load('./ckpt/imiter/latest.pth')['state_dict'])
     model = model.to(train_config.device) 
 
     if train_config.train_only_imitation == True: 

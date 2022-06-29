@@ -21,6 +21,7 @@ class CocoConfig:
 
     # Traning setting 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    resume_flag = True 
     train_only_imitation = False 
     batch_size = 8
     max_epoch = 10
