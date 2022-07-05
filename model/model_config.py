@@ -120,10 +120,10 @@ class IMITERConfig(PretrainedConfig):
         type_vocab_size=2,
         modality_type_vocab_size=2,
         max_position_embeddings=40,
-        hidden_size=768,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        intermediate_size=3072,
+        hidden_size=512,
+        num_hidden_layers=6,
+        num_attention_heads=8,
+        intermediate_size=2048,
         hidden_act="gelu",
         hidden_dropout_prob=0.0,
         attention_probs_dropout_prob=0.0,
@@ -138,7 +138,8 @@ class IMITERConfig(PretrainedConfig):
         tie_word_embeddings=False,
         num_images=-1, 
         imitate_bias=True, 
-        logit_scale_init_value=2.6592,
+        logit_scale_init_value=2.6592, 
+        single_train_flag=True, # employ single tower for model training 
         **kwargs
     ):
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
@@ -165,4 +166,5 @@ class IMITERConfig(PretrainedConfig):
         self.max_image_length = max_image_length
         self.num_images = num_images 
         self.logit_scale_init_value = logit_scale_init_value
-        self.imitate_bias = imitate_bias
+        self.imitate_bias = imitate_bias 
+        self.single_train_flag = single_train_flag

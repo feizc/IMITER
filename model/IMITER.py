@@ -933,10 +933,13 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
+        self.config = config 
         self.vilt = IMITERModel(config)
-        self.logit_scale = nn.Parameter(torch.ones([]) * self.config.logit_scale_init_value)
+        self.logit_scale = nn.Parameter(torch.ones([]) * self.config.logit_scale_init_value) 
+
         # Classifier head
-        # self.rank_output = nn.Linear(config.hidden_size, 1)
+        if config.single_train_flag == True: 
+            self.rank_output = nn.Linear(config.hidden_size*2, 1)
 
         # Initialize weights and apply final processing
         # self.post_init()
@@ -984,20 +987,27 @@ class IMITERForImageAndTextRetrieval(IMITERPreTrainedModel):
         image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
         text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
 
-        # cosine similarity as logits
-        logit_scale = self.logit_scale.exp()
-        logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
-        logits_per_image = logits_per_text.t()
+        if self.config.single_train_flag == True: 
+            cat_hidden_states = torch.cat((text_embeds, image_embeds), dim=-1) 
+            score = self.rank_output(cat_hidden_states) #(bsz, 1)
+            return (score, imitation_loss)
 
-        loss = imitation_loss
-        if return_loss: 
-            # logits_per_text.size() == logits_per_image.size() == (bsz, bsz) 
-            loss += contrastive_loss(logits_per_text)
-            accuracy = accuracy_compute(logits_per_text) 
+        else: 
+            # cosine similarity as logits
+            logit_scale = self.logit_scale.exp()
+            logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
+            logits_per_image = logits_per_text.t()
 
-        output = (logits_per_image, logits_per_text, text_embeds, image_embeds, )
-        return ((loss, accuracy, ) + output) if loss is not None else output
+            loss = imitation_loss
+            if return_loss: 
+                # logits_per_text.size() == logits_per_image.size() == (bsz, bsz) 
+                loss += contrastive_loss(logits_per_text)
+                accuracy = accuracy_compute(logits_per_text) 
+
+            output = (logits_per_image, logits_per_text, text_embeds, image_embeds, )
+            return ((loss, accuracy, ) + output) if loss is not None else output
         
+
     
     def step(
         self,

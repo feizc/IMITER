@@ -58,12 +58,16 @@ def compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss
         attention_mask = rearrange(text_masks, "bs fs tl -> (bs fs) tl").to(device),
     )
     score = infer[0][:, 0] 
-    score = rearrange(score, "(bs fs) -> bs fs", bs=_bs, fs=false_len + 1)
-    answer = torch.zeros(_bs).to(score).long() 
+    score = rearrange(score, "(bs fs) -> bs fs", bs=_bs, fs=false_len + 1)  # (bsz, false_len + 1)
+    answer = torch.zeros(_bs).to(score).long() #(bsz, ) 
+
+    index = torch.argmax(score, dim=1) 
+    acc = torch.eq(index.cpu(), answer.cpu()).float()
+    acc = acc.sum() / _bs 
     loss = F.cross_entropy(score, answer) 
     if imitation_loss == True: 
         loss += infer[1]
     
-    return loss
+    return loss, acc 
 
 

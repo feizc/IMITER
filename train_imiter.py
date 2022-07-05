@@ -5,7 +5,7 @@ import functools
 from tqdm import tqdm 
 
 from dataset import CocoConfig, CocoDataLoader
-from model import IMITERForImageAndTextRetrieval, compute_image_text_retrieval_loss, accuracy_compute
+from model import IMITERForImageAndTextRetrieval, compute_image_text_retrieval_loss, accuracy_compute, IMITERConfig
 
 
 
@@ -17,20 +17,26 @@ def train(model, train_loader, optimizer, train_config, epoch):
     with tqdm(enumerate(train_loader), total=len(train_loader)) as t:
         for idx, batch in t:  
             iteration += 1 
-            outputs = model(
-                pixel_values = batch['image'][0].to(train_config.device),
-                input_ids = batch['text_ids'].to(train_config.device),
-                attention_mask = batch['text_masks'].to(train_config.device),
-            )
-            
-            loss = outputs[0] / train_config.gradient_accumulation_steps 
+            if model.config.single_train_flag == True: 
+                loss, acc = compute_image_text_retrieval_loss(model, batch, train_config, imitation_loss=True) 
+                loss = loss / train_config.gradient_accumulation_steps  
+
+            else:
+                outputs = model(
+                    pixel_values = batch['image'][0].to(train_config.device),
+                    input_ids = batch['text_ids'].to(train_config.device),
+                    attention_mask = batch['text_masks'].to(train_config.device),
+                )
+                
+                loss = outputs[0] / train_config.gradient_accumulation_steps 
+                acc = outputs[1]
             loss.backward()
             if iteration % train_config.gradient_accumulation_steps == 0: 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm) 
                 optimizer.step() 
                 optimizer.zero_grad() 
             loss_cum += loss.item()
-            acc_cum += outputs[1].item() 
+            acc_cum += acc.item()
 
             t.set_description('Epoch %i' % epoch)
             t.set_postfix(loss=loss_cum / (idx+1), acc=acc_cum/(idx+1))
@@ -173,7 +179,8 @@ def main():
     data_loader = CocoDataLoader(train_config) 
     train_loader = data_loader.train_dataloader()  
 
-    model = IMITERForImageAndTextRetrieval.from_pretrained(train_config.tokenizer_path) 
+    model_config = IMITERConfig()
+    model = IMITERForImageAndTextRetrieval(model_config)
     if train_config.resume_flag == True: 
         model.load_state_dict(torch.load('./ckpt/imiter/latest.pth')['state_dict'])
     model = model.to(train_config.device) 
@@ -185,7 +192,7 @@ def main():
 
     for epoch in range(train_config.max_epoch): 
         train(model, train_loader, optimizer, train_config, epoch) 
-        eval(model, data_loader, train_config)
+        # eval(model, data_loader, train_config)
 
         torch.save({
             'state_dict': model.state_dict(),
