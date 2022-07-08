@@ -5,3 +5,4 @@ from .ITR_dual import *
 from .feature_extraction import * 
 from .loss import * 
 from .IMITER import * 
+from .vilt_cos import * 
