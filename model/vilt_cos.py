@@ -853,10 +853,10 @@ class ViltModel(ViltPreTrainedModel):
         )
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
-        text_emb, image_emb = self.pooler(sequence_output) if self.pooler is not None else None
+        text_emb, image_emb = self.pooler(sequence_output) 
 
         
-        return (sequence_output, text_emb, image_emb) + encoder_outputs[1:]
+        return (sequence_output, text_emb, image_emb) 
 
         
 
@@ -866,7 +866,8 @@ class ViltPooler(nn.Module):
         super().__init__()
         self.image_dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.text_dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
+        self.image_activation = nn.Tanh()
+        self.text_activation = nn.Tanh()
 
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
@@ -874,9 +875,9 @@ class ViltPooler(nn.Module):
         text_token_tensor = hidden_states[:, 0] 
         img_token_tensor = hidden_states[:, 41] 
 
-        text_token_tensor = self.activation(self.text_dense(text_token_tensor))
-        img_token_tensor = self.activation(self.image_dense(img_token_tensor))
-        return text_token_tensor, img_token_tensor
+        text_token_tensor = self.text_activation(self.text_dense(text_token_tensor))
+        img_token_tensor = self.image_activation(self.image_dense(img_token_tensor))
+        return (text_token_tensor, img_token_tensor)
 
 
 
@@ -885,10 +886,10 @@ class ViltForImageAndTextRetrieval(ViltPreTrainedModel):
         super().__init__(config)
 
         self.vilt = ViltModel(config)
-
+        self.logit_scale = nn.Parameter(torch.ones([]) * 2.6592,) 
         # Classifier head
         # self.rank_output = nn.Linear(config.hidden_size, 1)
-        self.cos_loss = nn.CosineSimilarity()
+        # self.cos_loss = nn.CosineSimilarity()
         # Initialize weights and apply final processing
         # self.post_init()
 
@@ -957,9 +958,12 @@ class ViltForImageAndTextRetrieval(ViltPreTrainedModel):
         image_f = outputs[2]
         
         image_f = image_f / image_f.norm(dim=-1, keepdim=True)
-        text_f = text_f / text_f.norm(dim=-1, keepdim=True)
-        score = self.cos_loss(image_f, text_f)
-
+        text_f = text_f / text_f.norm(dim=-1, keepdim=True) 
+        # score = self.cos_loss(image_f, text_f) # (bsz, ) 
+        logit_scale = self.logit_scale.exp() 
+        score = image_f * text_f * logit_scale
+        score = torch.sum(score, dim=-1)
+        
         loss = None
         if labels is not None:
             raise NotImplementedError("Training is not yet supported.")
