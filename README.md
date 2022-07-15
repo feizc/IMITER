@@ -13,9 +13,9 @@ Image-Text Retrieval for [COCO](https://cocodataset.org/#home) and
 Both IMITER-base and IMITER-large pre-trained checkpoints are released.
 
 
-[x] imitation for imgae/text key/value matrix 
-[] shared image/text embedding 
-[] mask perturbation consistency 
+- [x] imitation for imgae/text key/value matrix 
+- [] shared image/text embedding 
+- [] mask perturbation consistency 
 
 
 
