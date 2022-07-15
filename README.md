@@ -13,6 +13,12 @@ Image-Text Retrieval for [COCO](https://cocodataset.org/#home) and
 Both IMITER-base and IMITER-large pre-trained checkpoints are released.
 
 
+- [x] imitation for imgae/text key/value matrix 
+- [] shared image/text embedding 
+- [] mask perturbation consistency 
+
+
+
 ## 1 Requirements 
 
 We only support Linux with NVIDIA GPUs. We test on Ubuntu 18.04 and V100 cards. 
