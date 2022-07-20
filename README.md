@@ -14,7 +14,7 @@ Both IMITER-base and IMITER-large pre-trained checkpoints are released.
 
 
 - [x] imitation for imgae/text key/value matrix 
-- [x] shared image/text embedding 
+- [x] shared image/text embedding with linear projection
 - [] mask perturbation consistency 
 
 
