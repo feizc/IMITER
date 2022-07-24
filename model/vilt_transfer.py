@@ -72,11 +72,13 @@ class ViltForImagesAndTextClassificationOutput(ModelOutput):
     attentions: Optional[List[Tuple[torch.FloatTensor]]] = None
 
 
+
 # Copied from transformers.models.vit.modeling_vit.to_2tuple
 def to_2tuple(x):
     if isinstance(x, collections.abc.Iterable):
         return x
     return (x, x)
+
 
 
 class ViltEmbeddings(nn.Module):
@@ -101,7 +103,11 @@ class ViltEmbeddings(nn.Module):
             patch_size=config.patch_size,
             num_channels=config.num_channels,
             embed_dim=config.hidden_size,
-        )
+        ) 
+
+        # embedding transfer from text to patch 
+        self.tranfer_embeddings = nn.Linear(config.vocab_size, config.patch_size * config.patch_size) 
+
         num_patches = self.patch_embeddings.num_patches
         self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
         # modality type (text/patch) embeddings
@@ -178,7 +184,7 @@ class ViltEmbeddings(nn.Module):
                 select.append(torch.cat([valid_row_idx[i], non_valid_row_idx[i][pad_choice]], dim=0))
 
         select = torch.cat(select, dim=0)
-        x = x[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels)
+        x = x[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels) 
         x_mask = x_mask[select[:, 0], select[:, 1]].view(batch_size, -1)
         patch_index = patch_index[select[:, 0], select[:, 1]].view(batch_size, -1, 2)
         pos_embed = pos_embed[select[:, 0], select[:, 1]].view(batch_size, -1, num_channels)
@@ -193,7 +199,18 @@ class ViltEmbeddings(nn.Module):
 
         x_mask = torch.cat([torch.ones(x_mask.shape[0], 1).to(x_mask), x_mask], dim=1)
 
-        return x, x_mask, (patch_index, (height, width))
+        return x, x_mask, (patch_index, (height, width)) 
+    
+
+    def load_patch_embed(
+        self,
+        predicted_patch_embed,
+    ):
+        predicted_patch_embed = predicted_patch_embed.view(self.config.hidden_size, self.config.patch_size, self.config.patch_size).unsqueeze(1) 
+        predicted_patch_embed = predicted_patch_embed.expand(-1, 3, -1, -1)  # (768, 3, 32, 32) 
+        for _param in self.patch_embeddings.projection.parameters(): 
+            _param = predicted_patch_embed 
+
 
     def forward(
         self,
@@ -212,6 +229,11 @@ class ViltEmbeddings(nn.Module):
         )
         attention_mask = torch.cat([torch.ones(attention_mask.shape[0], 1).to(attention_mask), attention_mask], dim=1)
 
+        #  Embedding transfer
+        #  self.text_embeddings.word_embeddings.weight (30522, 768) 
+        predicted_patch_embed = self.tranfer_embeddings(self.text_embeddings.word_embeddings.weight.t()) 
+        self.load_patch_embed(predicted_patch_embed)
+        
 
         # PART 2: patch embeddings (with interpolated position encodings)
         if image_embeds is None:
@@ -318,11 +340,13 @@ class PatchEmbeddings(nn.Module):
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_patches = num_patches
-
-        self.projection = nn.Conv2d(num_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        
+        # Parameters (768, 3, 32, 32)
+        self.projection = nn.Conv2d(num_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False) 
+        
 
     def forward(self, pixel_values):
-        batch_size, num_channels, height, width = pixel_values.shape
+        batch_size, num_channels, height, width = pixel_values.shape 
         x = self.projection(pixel_values)
         return x
 
