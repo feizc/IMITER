@@ -10,4 +10,5 @@ from .IMITER import *
 # vilt_split uniter model with split vector 
 # vilt_imiter employ weight_matric learning 
 # vilt_transfer employ meta embedding projection
-from .vilt_transfer import * 
+# from .vilt_transfer import * 
+from .vilt_orthgoal import *
