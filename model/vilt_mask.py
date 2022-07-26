@@ -3,6 +3,15 @@ import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
 import numpy as np 
+from abc import ABC 
+from vilt import(
+    ViltForImageAndTextRetrieval, 
+    ViltSelfAttention,
+    ViltOutput,
+    ViltIntermediate,
+    ViltSelfOutput,
+    ViltPooler,
+)
 
 
 class L0Mask(nn.Module): 
@@ -89,3 +98,36 @@ class MaskedLinear(nn.Linear):
         res.weight = layer.weight
         res.bias = layer.bias
         return res 
+
+
+
+class MaskedViltForImageAndTextRetrieval(ViltForImageAndTextRetrieval, ABC): 
+    def __init__(self, config, out_w_per_mask, in_w_per_mask, mask_p): 
+        super().__init__(config) 
+
+        self.replace_layers_with_masked(out_w_per_mask, in_w_per_mask, mask_p)
+        self.r_, self.l_, self.b_ = -0.1, 1.1, 2 / 3 
+    
+    def replace_layers_with_masked(self, out_w_per_mask, in_w_per_mask, mask_p, verbose=False): 
+        """
+        Replaces layers with their masked versions.
+        out_w_per_mask: the number of output dims covered by a single mask parameter
+        in_w_per_mask: the same as above but for input dims
+        ex: (1,1) for weight masking
+            (768,1) for neuron masking
+            (768, 768) for layer masking
+        """
+        def replace_layers(layer_names, parent_types, replacement):
+            for module_name, module in self.named_modules():
+                for layer_name in layer_names:
+                    if hasattr(module, layer_name) and type(module) in parent_types:
+                        layer = getattr(module, layer_name)
+                        setattr(module, layer_name, replacement(layer))
+                        if verbose:
+                            print("Replaced {} in {}".format(layer_name, module_name))
+
+        replace_layers(('query', 'key', 'value', 'dense', 'pooler'),
+                       (ViltSelfAttention, ViltSelfOutput, ViltIntermediate, ViltOutput, ViltPooler),
+                       lambda x: MaskedLinear.from_layer(x, out_w_per_mask, in_w_per_mask, mask_p))
+
+
